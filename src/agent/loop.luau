@@ -28,6 +28,22 @@ local function isTurnStart(message)
     return true
 end
 
+local function isConversationalMessage(text)
+    if type(text) ~= "string" then
+        return false
+    end
+    local clean = string.lower(Util.Trim(text))
+    clean = clean:gsub("[%p%c]", "")
+    clean = Util.Trim(clean)
+    if clean == "hi" or clean == "hello" or clean == "hey" or clean == "sup" or clean == "yo"
+        or clean == "who are you" or clean == "what can you do" or clean == "help"
+        or clean == "what is this" or clean == "how are you" or clean == "test"
+        or clean == "thanks" or clean == "thank you" then
+        return true
+    end
+    return false
+end
+
 local function trimHistory(messages, budget)
     local total = 0
     for _, message in ipairs(messages) do
@@ -248,15 +264,15 @@ function Loop:BuildSystem()
         return system
             .. "\n\n"
             .. catalog
-            .. "\n\nUse the provided function tools. If they are unavailable, reply with ONLY a single JSON object:"
+            .. "\n\nWhen live game inspection or action is specifically requested, call the appropriate function tool. Otherwise, answer the user normally with plain text. If tools are unavailable, reply with ONLY a single JSON object:"
             .. ' {"tool":"tool_name","args":{...}}.'
     end
     return system
         .. "\n\n"
         .. catalog
-        .. "\n\nThis endpoint has no native tool calling. To call a tool, reply with ONLY a single JSON object:"
+        .. "\n\nThis endpoint has no native tool calling. When live game inspection is needed, reply with ONLY a single JSON object:"
         .. ' {"tool":"tool_name","args":{...}}.'
-        .. " You will then receive a [TOOL RESULT] message. Otherwise answer the user normally."
+        .. " You will then receive a [TOOL RESULT] message. Otherwise answer the user directly in plain text."
 end
 
 function Loop:BuildRequest()
@@ -284,13 +300,34 @@ function Loop:Execute()
     local maxSteps = Util.Clamp(tonumber(self.config.maxSteps) or 12, 1, 30)
     local step = 1
     local finished = false
+    local toolCallHistory = {}
+    local totalToolsCalled = 0
+    local forceFinalAnswer = false
+
+    -- Check if initiating user message is purely conversational (greeting / simple question)
+    local lastUserMessage = nil
+    for i = #self.messages, 1, -1 do
+        if self.messages[i].role == "user" and isTurnStart(self.messages[i]) then
+            lastUserMessage = self.messages[i].content
+            break
+        end
+    end
+    local isConversational = isConversationalMessage(lastUserMessage)
 
     while step <= maxSteps do
         if self.cancelled then
             break
         end
         self.ui:SetStatus("Thinking - step " .. tostring(step) .. "/" .. tostring(maxSteps))
-        local schemas = self.toolsSupported and self.tools:Schemas() or nil
+
+        -- If conversational greeting on step 1, or forced final answer, or on final step, omit schemas
+        -- so the model is forced to reply with direct text instead of looping tools blindly.
+        local allowTools = self.toolsSupported
+            and not forceFinalAnswer
+            and not (step == 1 and isConversational)
+            and (step < maxSteps)
+
+        local schemas = allowTools and self.tools:Schemas() or nil
         local request = self:BuildRequest()
         local response, err = self.client:Chat(request, schemas, function()
             return self.cancelled
@@ -363,18 +400,35 @@ function Loop:Execute()
                 end
                 local call = calls[index]
                 local name = call["function"].name
-                local args, argumentError = parseArguments(call["function"].arguments)
+                local rawArgs = call["function"].arguments or "{}"
+                local callSig = name .. ":" .. tostring(rawArgs)
+
+                toolCallHistory[callSig] = (toolCallHistory[callSig] or 0) + 1
+                totalToolsCalled += 1
+
                 local json
-                if args then
-                    local _, resultJson = self:RunTool(name, args, call["function"].arguments)
-                    json = resultJson
+                if toolCallHistory[callSig] > 1 then
+                    -- Repetitive call detected: break the loop!
+                    json = Serialize.Encode({
+                        ok = false,
+                        error = "LOOP DETECTED: You already called " .. name .. " with these arguments in this session. Do NOT repeat tool calls. Summarize your findings and answer the user directly now."
+                    }, 500)
+                    self.ui:AddToolCard(name, "loop blocked"):Finish(false, json, 0)
+                    forceFinalAnswer = true
                 else
-                    json = Serialize.Encode(
-                        { ok = false, error = argumentError },
-                        tonumber(self.config.maxToolChars) or 9000
-                    )
-                    self.ui:AddToolCard(name, "invalid arguments"):Finish(false, json, 0)
+                    local args, argumentError = parseArguments(call["function"].arguments)
+                    if args then
+                        local _, resultJson = self:RunTool(name, args, call["function"].arguments)
+                        json = resultJson
+                    else
+                        json = Serialize.Encode(
+                            { ok = false, error = argumentError },
+                            tonumber(self.config.maxToolChars) or 9000
+                        )
+                        self.ui:AddToolCard(name, "invalid arguments"):Finish(false, json, 0)
+                    end
                 end
+
                 table.insert(self.messages, {
                     role = "tool",
                     tool_call_id = call.id,
@@ -406,7 +460,7 @@ function Loop:Execute()
                         .. protocolCall.name
                         .. "]\n"
                         .. resultJson
-                        .. "\n\nContinue: call another tool or answer the user.",
+                        .. "\n\nContinue: summarize findings or answer the user in plain text.",
                 })
                 step += 1
             elseif Util.Trim(text) == "" and Util.Trim(reasoning or "") ~= "" then
@@ -423,13 +477,9 @@ function Loop:Execute()
                     finished = true
                     break
                 end
-                local nudge = "Continue now. Output ONLY your next step, with no explanations:"
-                if self.toolsSupported then
-                    nudge = nudge .. " call one of the provided tools, or give your final answer as plain text."
-                else
-                    nudge = nudge .. ' plain text, or exactly one JSON object {"tool":"name","args":{...}}.'
-                end
+                local nudge = "Continue now. Output your final answer to the user in plain text."
                 table.insert(self.messages, { role = "user", content = nudge })
+                forceFinalAnswer = true
                 step += 1
             else
                 if Util.Trim(text) == "" then
@@ -450,7 +500,33 @@ function Loop:Execute()
     if self.cancelled then
         self.ui:AddSystem("Stopped.")
     elseif not finished then
-        self.ui:AddSystem("Reached the step limit (" .. tostring(maxSteps) .. "). Send another message to continue.")
+        if totalToolsCalled > 0 then
+            -- Attempt one final text synthesis without tools so the user gets an actual answer
+            self.ui:SetStatus("Finalizing answer...")
+            local finalRequest = self:BuildRequest()
+            table.insert(finalRequest, {
+                role = "user",
+                content = "Please summarize your findings and provide your final response to the user now in plain text.",
+            })
+            local finalResp = self.client:Chat(finalRequest, nil, function()
+                return self.cancelled
+            end)
+            if finalResp and finalResp.data and finalResp.data.choices and finalResp.data.choices[1] then
+                local finalMsg = finalResp.data.choices[1].message or {}
+                local finalText = stripRflTags(normalizeContent(finalMsg.content))
+                if finalText and Util.Trim(finalText) ~= "" then
+                    self.ui:AddMessage("assistant", finalText)
+                    table.insert(self.messages, {
+                        role = "assistant",
+                        content = finalText,
+                    })
+                    finished = true
+                end
+            end
+        end
+        if not finished then
+            self.ui:AddSystem("Reached the step limit (" .. tostring(maxSteps) .. "). Send another message to continue.")
+        end
     end
 end
 

@@ -199,6 +199,22 @@ local function isTurnStart(message)
     return true
 end
 
+local function isConversationalMessage(text)
+    if type(text) ~= "string" then
+        return false
+    end
+    local clean = string.lower(Util.Trim(text))
+    clean = clean:gsub("[%p%c]", "")
+    clean = Util.Trim(clean)
+    if clean == "hi" or clean == "hello" or clean == "hey" or clean == "sup" or clean == "yo"
+        or clean == "who are you" or clean == "what can you do" or clean == "help"
+        or clean == "what is this" or clean == "how are you" or clean == "test"
+        or clean == "thanks" or clean == "thank you" then
+        return true
+    end
+    return false
+end
+
 local function trimHistory(messages, budget)
     local total = 0
     for _, message in ipairs(messages) do
@@ -419,15 +435,15 @@ function Loop:BuildSystem()
         return system
             .. "\n\n"
             .. catalog
-            .. "\n\nUse the provided function tools. If they are unavailable, reply with ONLY a single JSON object:"
+            .. "\n\nWhen live game inspection or action is specifically requested, call the appropriate function tool. Otherwise, answer the user normally with plain text. If tools are unavailable, reply with ONLY a single JSON object:"
             .. ' {"tool":"tool_name","args":{...}}.'
     end
     return system
         .. "\n\n"
         .. catalog
-        .. "\n\nThis endpoint has no native tool calling. To call a tool, reply with ONLY a single JSON object:"
+        .. "\n\nThis endpoint has no native tool calling. When live game inspection is needed, reply with ONLY a single JSON object:"
         .. ' {"tool":"tool_name","args":{...}}.'
-        .. " You will then receive a [TOOL RESULT] message. Otherwise answer the user normally."
+        .. " You will then receive a [TOOL RESULT] message. Otherwise answer the user directly in plain text."
 end
 
 function Loop:BuildRequest()
@@ -455,13 +471,34 @@ function Loop:Execute()
     local maxSteps = Util.Clamp(tonumber(self.config.maxSteps) or 12, 1, 30)
     local step = 1
     local finished = false
+    local toolCallHistory = {}
+    local totalToolsCalled = 0
+    local forceFinalAnswer = false
+
+    -- Check if initiating user message is purely conversational (greeting / simple question)
+    local lastUserMessage = nil
+    for i = #self.messages, 1, -1 do
+        if self.messages[i].role == "user" and isTurnStart(self.messages[i]) then
+            lastUserMessage = self.messages[i].content
+            break
+        end
+    end
+    local isConversational = isConversationalMessage(lastUserMessage)
 
     while step <= maxSteps do
         if self.cancelled then
             break
         end
         self.ui:SetStatus("Thinking - step " .. tostring(step) .. "/" .. tostring(maxSteps))
-        local schemas = self.toolsSupported and self.tools:Schemas() or nil
+
+        -- If conversational greeting on step 1, or forced final answer, or on final step, omit schemas
+        -- so the model is forced to reply with direct text instead of looping tools blindly.
+        local allowTools = self.toolsSupported
+            and not forceFinalAnswer
+            and not (step == 1 and isConversational)
+            and (step < maxSteps)
+
+        local schemas = allowTools and self.tools:Schemas() or nil
         local request = self:BuildRequest()
         local response, err = self.client:Chat(request, schemas, function()
             return self.cancelled
@@ -534,18 +571,35 @@ function Loop:Execute()
                 end
                 local call = calls[index]
                 local name = call["function"].name
-                local args, argumentError = parseArguments(call["function"].arguments)
+                local rawArgs = call["function"].arguments or "{}"
+                local callSig = name .. ":" .. tostring(rawArgs)
+
+                toolCallHistory[callSig] = (toolCallHistory[callSig] or 0) + 1
+                totalToolsCalled += 1
+
                 local json
-                if args then
-                    local _, resultJson = self:RunTool(name, args, call["function"].arguments)
-                    json = resultJson
+                if toolCallHistory[callSig] > 1 then
+                    -- Repetitive call detected: break the loop!
+                    json = Serialize.Encode({
+                        ok = false,
+                        error = "LOOP DETECTED: You already called " .. name .. " with these arguments in this session. Do NOT repeat tool calls. Summarize your findings and answer the user directly now."
+                    }, 500)
+                    self.ui:AddToolCard(name, "loop blocked"):Finish(false, json, 0)
+                    forceFinalAnswer = true
                 else
-                    json = Serialize.Encode(
-                        { ok = false, error = argumentError },
-                        tonumber(self.config.maxToolChars) or 9000
-                    )
-                    self.ui:AddToolCard(name, "invalid arguments"):Finish(false, json, 0)
+                    local args, argumentError = parseArguments(call["function"].arguments)
+                    if args then
+                        local _, resultJson = self:RunTool(name, args, call["function"].arguments)
+                        json = resultJson
+                    else
+                        json = Serialize.Encode(
+                            { ok = false, error = argumentError },
+                            tonumber(self.config.maxToolChars) or 9000
+                        )
+                        self.ui:AddToolCard(name, "invalid arguments"):Finish(false, json, 0)
+                    end
                 end
+
                 table.insert(self.messages, {
                     role = "tool",
                     tool_call_id = call.id,
@@ -577,7 +631,7 @@ function Loop:Execute()
                         .. protocolCall.name
                         .. "]\n"
                         .. resultJson
-                        .. "\n\nContinue: call another tool or answer the user.",
+                        .. "\n\nContinue: summarize findings or answer the user in plain text.",
                 })
                 step += 1
             elseif Util.Trim(text) == "" and Util.Trim(reasoning or "") ~= "" then
@@ -594,13 +648,9 @@ function Loop:Execute()
                     finished = true
                     break
                 end
-                local nudge = "Continue now. Output ONLY your next step, with no explanations:"
-                if self.toolsSupported then
-                    nudge = nudge .. " call one of the provided tools, or give your final answer as plain text."
-                else
-                    nudge = nudge .. ' plain text, or exactly one JSON object {"tool":"name","args":{...}}.'
-                end
+                local nudge = "Continue now. Output your final answer to the user in plain text."
                 table.insert(self.messages, { role = "user", content = nudge })
+                forceFinalAnswer = true
                 step += 1
             else
                 if Util.Trim(text) == "" then
@@ -621,7 +671,33 @@ function Loop:Execute()
     if self.cancelled then
         self.ui:AddSystem("Stopped.")
     elseif not finished then
-        self.ui:AddSystem("Reached the step limit (" .. tostring(maxSteps) .. "). Send another message to continue.")
+        if totalToolsCalled > 0 then
+            -- Attempt one final text synthesis without tools so the user gets an actual answer
+            self.ui:SetStatus("Finalizing answer...")
+            local finalRequest = self:BuildRequest()
+            table.insert(finalRequest, {
+                role = "user",
+                content = "Please summarize your findings and provide your final response to the user now in plain text.",
+            })
+            local finalResp = self.client:Chat(finalRequest, nil, function()
+                return self.cancelled
+            end)
+            if finalResp and finalResp.data and finalResp.data.choices and finalResp.data.choices[1] then
+                local finalMsg = finalResp.data.choices[1].message or {}
+                local finalText = stripRflTags(normalizeContent(finalMsg.content))
+                if finalText and Util.Trim(finalText) ~= "" then
+                    self.ui:AddMessage("assistant", finalText)
+                    table.insert(self.messages, {
+                        role = "assistant",
+                        content = finalText,
+                    })
+                    finished = true
+                end
+            end
+        end
+        if not finished then
+            self.ui:AddSystem("Reached the step limit (" .. tostring(maxSteps) .. "). Send another message to continue.")
+        end
     end
 end
 
@@ -690,14 +766,22 @@ function Prompt.Build(compat, config)
         "- Platform: " .. platform,
         "",
         "Rules:",
-        "1. Inspect before changing anything. Never assume an instance path or script name.",
-        "2. Use search_instances and get_descendants_tree with tight limits. Never dump the entire game.",
-        "3. Use list_scripts to obtain debugIds, then read_script or grep_scripts for source.",
-        "4. run_luau executes in the executor with full access. The user is asked to approve each script unless they enabled always-allow. Always return a compact, JSON-serializable value; print output is captured too.",
-        "5. Remote spying is Cobalt only. Use the spy_* tools; do not install or hook a second remote spy.",
-        "6. Only operate on places the user owns or is authorized to test. Do not use these tools against other players.",
-        "7. Keep answers short and concrete. Use fenced code blocks when showing code. No markdown tables.",
-        "8. If a tool fails, read the error and try a narrower call instead of repeating it unchanged.",
+        "1. WHEN TO USE TOOLS VS TEXT:",
+        "   - Answer directly with plain text (NO tool calls) for greetings, conversational messages, conceptual questions, script writing from scratch, explanations (e.g. 'how does task.wait work?', 'make a fly script'), and any request that does not strictly require live DataModel data.",
+        "   - ONLY call tools when the user explicitly asks you to inspect, search, debug, or interact with instances/scripts in the currently running game session.",
+        "2. NO BLIND OR REPETITIVE CALLS:",
+        "   - NEVER call the same tool multiple times with the same arguments.",
+        "   - If a tool returns what you need or empty results, STOP calling tools immediately and answer the user.",
+        "   - After at most 1 or 2 targeted tool calls, ALWAYS provide your final findings and explanation in plain text. Never leave the user hanging without a message.",
+        "3. Live Inspection Guidelines:",
+        "   - Inspect before changing anything. Never assume an instance path or script name.",
+        "   - Use search_instances and get_descendants_tree with tight limits. Never dump the entire game.",
+        "   - Use list_scripts to obtain debugIds, then read_script or grep_scripts for source.",
+        "   - run_luau executes in the executor with full access. The user is asked to approve each script unless they enabled always-allow. Always return a compact, JSON-serializable value; print output is captured too.",
+        "   - Remote spying is Cobalt only. Use the spy_* tools; do not install or hook a second remote spy.",
+        "   - Only operate on places the user owns or is authorized to test. Do not use these tools against other players.",
+        "   - Keep answers short and concrete. Use fenced code blocks when showing code. No markdown tables.",
+        "   - If a tool fails, read the error and try a narrower call instead of repeating it unchanged.",
     }
     local extra = config.extraSystemPrompt
     if type(extra) == "string" and extra ~= "" then
@@ -3836,10 +3920,14 @@ function UI:Build()
     }, gui)
     withCorner(self.root, Theme.radiusWindow)
     withStroke(self.root, Theme.line, 1, 0.25)
+    -- Subtle top-to-bottom gradient that stays readable (no multiplicative
+    -- darkening — the background is already near-black).
     local backdrop = Instance.new("UIGradient")
-    backdrop.Color = ColorSequence.new(Color3.fromRGB(20, 20, 23), Theme.bg)
+    backdrop.Color = ColorSequence.new(Color3.fromRGB(22, 22, 26), Color3.fromRGB(15, 15, 17))
     backdrop.Rotation = 90
+    backdrop.Transparency = NumberSequence.new(0)
     backdrop.Parent = self.root
+    self.root.BackgroundColor3 = Color3.new(1, 1, 1)
 
     create("Frame", {
         BackgroundColor3 = Theme.white,
@@ -5325,12 +5413,13 @@ end
 
 function UI:ClearMessages()
     for _, child in ipairs(self.scroll:GetChildren()) do
-        if child ~= self.hero and not child:IsA("UIListLayout") then
+        if child ~= self.hero and not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
             child:Destroy()
         end
     end
     self.order = 0
     self.thinkingCards = {}
+    self.activeThinkingCard = nil
     if self.hero then
         self.hero.Visible = true
         self.hero.Size = UDim2.new(1, 0, 0, HERO_HEIGHT)
@@ -5576,6 +5665,15 @@ end
 
 function UI:AddThinking(text)
     self:HideHero()
+
+    -- If a thinking indicator is already active, just update its text instead of
+    -- stacking multiple thinking rows on top of each other.
+    local active = self.activeThinkingCard
+    if active and active.updateText then
+        active.updateText(text)
+        return
+    end
+
     self.order += 1
     local card = create("Frame", {
         BackgroundTransparency = 1,
@@ -5693,7 +5791,7 @@ function UI:AddThinking(text)
         tween(hover, { BackgroundTransparency = 1 }, 0.12)
     end)
 
-    table.insert(self.thinkingCards, {
+    local thinkingApi = {
         settle = function()
             if shimmer then
                 pcall(function()
@@ -5703,8 +5801,24 @@ function UI:AddThinking(text)
             label.Text = "Thought"
             label.TextTransparency = 0.3
             label.TextColor3 = Theme.faint
+            if self.activeThinkingCard == thinkingApi then
+                self.activeThinkingCard = nil
+            end
         end,
-    })
+        updateText = function(newText)
+            body.Text = Util.Truncate(newText or "", 1200)
+            if expanded then
+                task.defer(function()
+                    task.wait()
+                    local bodyHeight = body.AbsoluteSize.Y
+                    rule.Size = UDim2.new(0, 1, 0, math.max(0, bodyHeight - 2))
+                    card.Size = UDim2.new(1, 0, 0, 30 + bodyHeight)
+                end)
+            end
+        end,
+    }
+    self.activeThinkingCard = thinkingApi
+    table.insert(self.thinkingCards, thinkingApi)
 
     self:ScrollToBottom()
 end
@@ -5714,31 +5828,33 @@ function UI:SettleThinking()
         pcall(card.settle)
     end
     self.thinkingCards = {}
+    self.activeThinkingCard = nil
 end
 
 function UI:AddToolCard(name, argsText)
     self:HideHero()
     self.order += 1
+
+    -- Compact inline row — no background fill, no stroke, just a thin line
+    -- like a log entry. Matches the CodaAI / ChatGPT inline-activity style.
     local card = create("Frame", {
-        BackgroundColor3 = Theme.surface,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, 32),
+        Size = UDim2.new(1, 0, 0, 24),
         LayoutOrder = self.order,
         ClipsDescendants = true,
     }, self.scroll)
-    withCorner(card, 10)
-    withStroke(card, Theme.lineSoft, 1, 0.35)
 
     local header = create("TextButton", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 32),
+        Size = UDim2.new(1, 0, 0, 24),
         Text = "",
         AutoButtonColor = false,
     }, card)
 
     local dot = create("Frame", {
-        Size = UDim2.fromOffset(6, 6),
-        Position = UDim2.fromOffset(12, 13),
+        Size = UDim2.fromOffset(5, 5),
+        Position = UDim2.fromOffset(2, 10),
         BackgroundColor3 = Theme.warn,
         BorderSizePixel = 0,
     }, header)
@@ -5746,11 +5862,11 @@ function UI:AddToolCard(name, argsText)
 
     local title = create("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(25, 0),
-        Size = UDim2.new(1, -110, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -100, 1, 0),
         Font = Theme.fontCode,
         TextSize = 11,
-        TextColor3 = Theme.text,
+        TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         Text = name,
@@ -5759,7 +5875,7 @@ function UI:AddToolCard(name, argsText)
     local statusLabel = create("TextLabel", {
         BackgroundTransparency = 1,
         Position = UDim2.new(1, -78, 0, 0),
-        Size = UDim2.fromOffset(58, 32),
+        Size = UDim2.fromOffset(58, 24),
         Font = Theme.font,
         TextSize = 9,
         TextColor3 = Theme.faint,
@@ -5768,17 +5884,17 @@ function UI:AddToolCard(name, argsText)
     }, header)
 
     local chevron = create("Frame", {
-        Size = UDim2.fromOffset(10, 10),
-        Position = UDim2.new(1, -14, 0, 16),
+        Size = UDim2.fromOffset(8, 8),
+        Position = UDim2.new(1, -8, 0, 8),
         BackgroundTransparency = 1,
     }, header)
-    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, -1.5), 45, Theme.faint)
-    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, 1.5), -45, Theme.faint)
+    bar(chevron, 4, 1, UDim2.new(0.5, -1, 0.5, -1), 45, Theme.faint)
+    bar(chevron, 4, 1, UDim2.new(0.5, -1, 0.5, 1), -45, Theme.faint)
 
     local bodyHolder = create("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 36),
-        Size = UDim2.new(1, -24, 0, 0),
+        Position = UDim2.fromOffset(14, 26),
+        Size = UDim2.new(1, -28, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Visible = false,
     }, card)
@@ -5806,12 +5922,12 @@ function UI:AddToolCard(name, argsText)
                     return
                 end
                 tween(card, {
-                    Size = UDim2.new(1, 0, 0, 44 + bodyHolder.AbsoluteSize.Y),
+                    Size = UDim2.new(1, 0, 0, 32 + bodyHolder.AbsoluteSize.Y),
                 }, 0.18, Enum.EasingStyle.Quint)
                 self:ScrollToBottom()
             end)
         else
-            tween(card, { Size = UDim2.new(1, 0, 0, 32) }, 0.16, Enum.EasingStyle.Quint)
+            tween(card, { Size = UDim2.new(1, 0, 0, 24) }, 0.16, Enum.EasingStyle.Quint)
         end
     end
     header.MouseButton1Click:Connect(function()

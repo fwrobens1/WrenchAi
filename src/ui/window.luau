@@ -266,10 +266,14 @@ function UI:Build()
     }, gui)
     withCorner(self.root, Theme.radiusWindow)
     withStroke(self.root, Theme.line, 1, 0.25)
+    -- Subtle top-to-bottom gradient that stays readable (no multiplicative
+    -- darkening — the background is already near-black).
     local backdrop = Instance.new("UIGradient")
-    backdrop.Color = ColorSequence.new(Color3.fromRGB(20, 20, 23), Theme.bg)
+    backdrop.Color = ColorSequence.new(Color3.fromRGB(22, 22, 26), Color3.fromRGB(15, 15, 17))
     backdrop.Rotation = 90
+    backdrop.Transparency = NumberSequence.new(0)
     backdrop.Parent = self.root
+    self.root.BackgroundColor3 = Color3.new(1, 1, 1)
 
     create("Frame", {
         BackgroundColor3 = Theme.white,
@@ -1755,12 +1759,13 @@ end
 
 function UI:ClearMessages()
     for _, child in ipairs(self.scroll:GetChildren()) do
-        if child ~= self.hero and not child:IsA("UIListLayout") then
+        if child ~= self.hero and not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
             child:Destroy()
         end
     end
     self.order = 0
     self.thinkingCards = {}
+    self.activeThinkingCard = nil
     if self.hero then
         self.hero.Visible = true
         self.hero.Size = UDim2.new(1, 0, 0, HERO_HEIGHT)
@@ -2006,6 +2011,15 @@ end
 
 function UI:AddThinking(text)
     self:HideHero()
+
+    -- If a thinking indicator is already active, just update its text instead of
+    -- stacking multiple thinking rows on top of each other.
+    local active = self.activeThinkingCard
+    if active and active.updateText then
+        active.updateText(text)
+        return
+    end
+
     self.order += 1
     local card = create("Frame", {
         BackgroundTransparency = 1,
@@ -2123,7 +2137,7 @@ function UI:AddThinking(text)
         tween(hover, { BackgroundTransparency = 1 }, 0.12)
     end)
 
-    table.insert(self.thinkingCards, {
+    local thinkingApi = {
         settle = function()
             if shimmer then
                 pcall(function()
@@ -2133,8 +2147,24 @@ function UI:AddThinking(text)
             label.Text = "Thought"
             label.TextTransparency = 0.3
             label.TextColor3 = Theme.faint
+            if self.activeThinkingCard == thinkingApi then
+                self.activeThinkingCard = nil
+            end
         end,
-    })
+        updateText = function(newText)
+            body.Text = Util.Truncate(newText or "", 1200)
+            if expanded then
+                task.defer(function()
+                    task.wait()
+                    local bodyHeight = body.AbsoluteSize.Y
+                    rule.Size = UDim2.new(0, 1, 0, math.max(0, bodyHeight - 2))
+                    card.Size = UDim2.new(1, 0, 0, 30 + bodyHeight)
+                end)
+            end
+        end,
+    }
+    self.activeThinkingCard = thinkingApi
+    table.insert(self.thinkingCards, thinkingApi)
 
     self:ScrollToBottom()
 end
@@ -2144,31 +2174,33 @@ function UI:SettleThinking()
         pcall(card.settle)
     end
     self.thinkingCards = {}
+    self.activeThinkingCard = nil
 end
 
 function UI:AddToolCard(name, argsText)
     self:HideHero()
     self.order += 1
+
+    -- Compact inline row — no background fill, no stroke, just a thin line
+    -- like a log entry. Matches the CodaAI / ChatGPT inline-activity style.
     local card = create("Frame", {
-        BackgroundColor3 = Theme.surface,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, 32),
+        Size = UDim2.new(1, 0, 0, 24),
         LayoutOrder = self.order,
         ClipsDescendants = true,
     }, self.scroll)
-    withCorner(card, 10)
-    withStroke(card, Theme.lineSoft, 1, 0.35)
 
     local header = create("TextButton", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 32),
+        Size = UDim2.new(1, 0, 0, 24),
         Text = "",
         AutoButtonColor = false,
     }, card)
 
     local dot = create("Frame", {
-        Size = UDim2.fromOffset(6, 6),
-        Position = UDim2.fromOffset(12, 13),
+        Size = UDim2.fromOffset(5, 5),
+        Position = UDim2.fromOffset(2, 10),
         BackgroundColor3 = Theme.warn,
         BorderSizePixel = 0,
     }, header)
@@ -2176,11 +2208,11 @@ function UI:AddToolCard(name, argsText)
 
     local title = create("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(25, 0),
-        Size = UDim2.new(1, -110, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -100, 1, 0),
         Font = Theme.fontCode,
         TextSize = 11,
-        TextColor3 = Theme.text,
+        TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         Text = name,
@@ -2189,7 +2221,7 @@ function UI:AddToolCard(name, argsText)
     local statusLabel = create("TextLabel", {
         BackgroundTransparency = 1,
         Position = UDim2.new(1, -78, 0, 0),
-        Size = UDim2.fromOffset(58, 32),
+        Size = UDim2.fromOffset(58, 24),
         Font = Theme.font,
         TextSize = 9,
         TextColor3 = Theme.faint,
@@ -2198,17 +2230,17 @@ function UI:AddToolCard(name, argsText)
     }, header)
 
     local chevron = create("Frame", {
-        Size = UDim2.fromOffset(10, 10),
-        Position = UDim2.new(1, -14, 0, 16),
+        Size = UDim2.fromOffset(8, 8),
+        Position = UDim2.new(1, -8, 0, 8),
         BackgroundTransparency = 1,
     }, header)
-    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, -1.5), 45, Theme.faint)
-    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, 1.5), -45, Theme.faint)
+    bar(chevron, 4, 1, UDim2.new(0.5, -1, 0.5, -1), 45, Theme.faint)
+    bar(chevron, 4, 1, UDim2.new(0.5, -1, 0.5, 1), -45, Theme.faint)
 
     local bodyHolder = create("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 36),
-        Size = UDim2.new(1, -24, 0, 0),
+        Position = UDim2.fromOffset(14, 26),
+        Size = UDim2.new(1, -28, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Visible = false,
     }, card)
@@ -2236,12 +2268,12 @@ function UI:AddToolCard(name, argsText)
                     return
                 end
                 tween(card, {
-                    Size = UDim2.new(1, 0, 0, 44 + bodyHolder.AbsoluteSize.Y),
+                    Size = UDim2.new(1, 0, 0, 32 + bodyHolder.AbsoluteSize.Y),
                 }, 0.18, Enum.EasingStyle.Quint)
                 self:ScrollToBottom()
             end)
         else
-            tween(card, { Size = UDim2.new(1, 0, 0, 32) }, 0.16, Enum.EasingStyle.Quint)
+            tween(card, { Size = UDim2.new(1, 0, 0, 24) }, 0.16, Enum.EasingStyle.Quint)
         end
     end
     header.MouseButton1Click:Connect(function()
