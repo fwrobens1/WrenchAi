@@ -56,6 +56,21 @@ G.pushResponse('{"choices":[{"message":{"role":"assistant","content":"Place 7100
 api.loop:Send("where am I")
 check(api.loop.messages[#api.loop.messages].content == "Place 7100000000.", "JSON protocol fallback answered")
 
+G.pushResponse(
+    '{"choices":[{"message":{"role":"assistant","content":"{\\"tool\\":\\"get_game_info\\",\\"args\\":{}}</rfl:parameter>","reasoning_content":"planned call</rfl:parameter>"}}]}'
+)
+G.pushResponse('{"choices":[{"message":{"role":"assistant","content":"Clean answer.","reasoning_content":"done thinking"}}]}')
+api.loop:Send("tagged tool call")
+check(api.loop.messages[#api.loop.messages].content == "Clean answer.", "rfl tags stripped from the final answer")
+check(
+    api.loop.messages[#api.loop.messages - 1].content:find("TOOL RESULT", 1, true) ~= nil,
+    "tagged JSON still executed as a tool call"
+)
+check(
+    api.loop.messages[#api.loop.messages - 2].reasoning_content == "planned call",
+    "rfl tags stripped from stored reasoning"
+)
+
 local info = api.tools:Call("get_game_info", {})
 check(info.ok, "get_game_info ok: " .. tostring(info.error))
 check(info.data.placeId == 7100000000, "game info placeId")

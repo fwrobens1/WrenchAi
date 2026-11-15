@@ -96,6 +96,15 @@ local function normalizeContent(content)
     return tostring(content)
 end
 
+-- Reflection's API sometimes leaks its parameter-injection tags into
+-- content and reasoning_content; they break JSON tool-call detection.
+local function stripRflTags(text)
+    if type(text) ~= "string" then
+        return text
+    end
+    return (text:gsub("</?rfl:[^>]*>", ""))
+end
+
 local function sanitizeToolCalls(rawCalls)
     local calls = {}
     if type(rawCalls) ~= "table" then
@@ -312,8 +321,8 @@ function Loop:Execute()
         end
 
         local message = choice.message or {}
-        local content = normalizeContent(message.content)
-        local reasoning = normalizeContent(message.reasoning_content)
+        local content = stripRflTags(normalizeContent(message.content))
+        local reasoning = stripRflTags(normalizeContent(message.reasoning_content))
         local calls = sanitizeToolCalls(message.tool_calls)
         -- Beam demands the reasoning of every earlier assistant message be
         -- sent back with it; cap it so history does not blow the budget.
