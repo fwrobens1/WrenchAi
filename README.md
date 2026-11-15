@@ -58,7 +58,9 @@ This writes `dist/WrenchAi.luau` (single file). The bundler rewrites relative
 
 The smoke suite runs the real bundle against mocked Roblox globals (no Studio needed). It
 covers first-run settings, tool registration, native tool calls, the JSON protocol fallback,
-inspector/GUI/spy tools, `run_luau` approval, config updates, and UI state transitions.
+inspector/GUI/spy tools, `run_luau` approval, config updates, and UI state transitions. It
+also evaluates the bundle twice in one session and asserts the first UI is destroyed and a
+fresh API is exported, so re-execution cannot stack windows.
 
 ```sh
 # put the Luau CLI on PATH first (luau-windows.zip from luau-lang/luau releases)
@@ -93,11 +95,36 @@ getgenv().WrenchAiURL = "https://example.test/dist/WrenchAi.luau"
 getgenv().WrenchAiSource = "<bundle contents>"
 ```
 
-On Delta for iOS the window appears bottom-right; drag it by the header and drag it up while
-typing so the on-screen keyboard does not cover the input. Tap **AI** to reopen it after
-closing.
+Re-running the loader destroys the previous window, cancels any running turn, and sweeps
+`gethui` / `PlayerGui` / `CoreGui` for a leftover `WrenchAi` ScreenGui, so executing the
+script twice never stacks two windows.
 
-Re-running the loader destroys the previous window and cancels any running turn.
+## UI
+
+A single dark-charcoal panel designed to sit on top of any game without looking like a
+default Roblox GUI.
+
+- **Auto-scale.** The panel is authored at 420×700 and wrapped in a `UIScale` that fits the
+  current viewport (clamped 0.55–1.15). It recomputes on viewport changes, so phones,
+  tablets, and desktop windows all get a correctly sized window.
+- **Draggable.** Grab the header anywhere that is not a button; the drag delta is divided by
+  the current scale, and the window is clamped inside the screen edges.
+- **Mobile.** Comfortable hit targets, a keyboard-lift animation when the composer is
+  focused, a 58px floating circular button to reopen the panel after closing, and a
+  minimized pill (logo + live status) docked bottom-right.
+- **Animations.** Scale/fade open, slide-in settings panel, pulsing status dot while a turn
+  runs, expanding tool cards, animated switches and focus strokes, smooth scroll-to-bottom.
+- **Minimize / close.** The header `–` button collapses to the pill; `×` unloads the window
+  and leaves the floating button.
+- **Chat.** Right-aligned user bubbles, plain assistant text with inline code blocks,
+  compact tool chips (`name · status · duration`) that expand to arguments and output,
+  error cards, and an approval card for `run_luau`.
+- **Settings overlay.** Connection, model, sampling, limits, Cobalt/Dex URLs, system prompt,
+  and the **Always allow run_luau** switch, saved to `WrenchAi/config.json`.
+
+On Delta for iOS the window opens bottom-right. Tap the floating button to reopen, the pill
+to restore a minimized panel, and drag it up while typing if the keyboard still covers the
+composer.
 
 ## Updating the repo
 
@@ -118,7 +145,7 @@ has `writefile`; otherwise they last for the session.
 | --- | --- | --- |
 | Base URL | `https://api.refuseless.com/v1` | Any OpenAI-compatible `/chat/completions` root |
 | Model | `glm-5.3-abliterated` | Sent as `model` |
-| API key | empty | `Authorization: Bearer ...`, stored only in the executor workspace |
+| API key | empty | `Authorization: Bearer ...`; can be injected at runtime via `getgenv().WrenchAiApiKey` |
 | Temperature | `0.7` | |
 | Max agent steps | `12` | 1–30 tool/answer iterations per message |
 | Cobalt URL | upstream `Cobalt` raw URL | Downloaded on first `spy_*` use |
@@ -128,6 +155,32 @@ has `writefile`; otherwise they last for the session.
 
 The API key is never written into the bundle or sent anywhere except the configured base
 URL. Prefer a key you can rotate; config JSON is plain text in the executor workspace.
+
+If a key is already in the executor environment, injection overrides the saved one without
+touching the config file:
+
+```lua
+getgenv().WrenchAiApiKey = "<key>"
+loadstring(game:HttpGet("https://raw.githubusercontent.com/fwrobens1/WrenchAi/main/loader.luau"))()
+```
+
+### About the `WRENCHAI_API_KEY` GitHub environment
+
+GitHub **environment secrets are write-only** and are decrypted only inside an Actions
+runner. An executor script running on a phone has no GitHub token and cannot read them, so
+WrenchAi does not try. Because this repository is public, embedding the key in
+`dist/WrenchAi.luau` would publish it to everyone.
+
+What the environment secret is good for:
+
+- CI that calls the endpoint with the secret to verify the key still works, without ever
+  writing it to the bundle (see `.github/workflows/` in the repo).
+- A future proxy on your own host (the EC2 box behind Tailscale, for example): the proxy
+  holds `WRENCHAI_API_KEY` and forwards `/v1/chat/completions`, and the in-game config only
+  knows the proxy URL. That is the only design that keeps a real key out of every client.
+
+Until a proxy exists, set the key once in the on-device settings panel or inject it with
+`getgenv().WrenchAiApiKey` at load time.
 
 ## Tools
 

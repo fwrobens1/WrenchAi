@@ -1,13 +1,19 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local Theme = require("./theme")
 local Util = require("../util")
 
 local UI = {}
 UI.__index = UI
 
-local WINDOW_WIDTH = 390
-local WINDOW_HEIGHT = 580
+local DESIGN_WIDTH = 420
+local DESIGN_HEIGHT = 700
+local WINDOW_MARGIN = 12
+local HEADER_HEIGHT = 54
+local STATUS_HEIGHT = 22
+local CHAT_TOP = 80
+local COMPOSER_HEIGHT = 58
 
 local function create(className, properties, parent)
     local instance = Instance.new(className)
@@ -22,6 +28,25 @@ local function create(className, properties, parent)
     return instance
 end
 
+local function tween(instance, properties, duration, style, direction, repeatCount, reverses)
+    local ok, animation = pcall(function()
+        local info = TweenInfo.new(
+            duration or 0.2,
+            style or Enum.EasingStyle.Quad,
+            direction or Enum.EasingDirection.Out,
+            repeatCount or 0,
+            reverses or false
+        )
+        local created = TweenService:Create(instance, info, properties)
+        created:Play()
+        return created
+    end)
+    if ok then
+        return animation
+    end
+    return nil
+end
+
 local function withCorner(instance, radius)
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, radius)
@@ -31,7 +56,7 @@ end
 
 local function withStroke(instance, color, thickness, transparency)
     local stroke = Instance.new("UIStroke")
-    stroke.Color = color
+    stroke.Color = color or Theme.line
     stroke.Thickness = thickness or 1
     stroke.Transparency = transparency or 0
     stroke.Parent = instance
@@ -46,6 +71,65 @@ local function withPadding(instance, top, right, bottom, left)
     padding.PaddingLeft = UDim.new(0, left)
     padding.Parent = instance
     return padding
+end
+
+local function withList(instance, padding, horizontal)
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, padding or 0)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    if horizontal then
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+    end
+    layout.Parent = instance
+    return layout
+end
+
+local function bar(parent, width, height, position, rotation, color)
+    return create("Frame", {
+        Size = UDim2.fromOffset(width, height),
+        Position = position,
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = color or Theme.text,
+        BorderSizePixel = 0,
+        Rotation = rotation or 0,
+    }, parent)
+end
+
+local ICONS = {}
+
+function ICONS.plus(parent, color)
+    bar(parent, 11, 1.6, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.6, 11, UDim2.fromScale(0.5, 0.5), 0, color)
+end
+
+function ICONS.minus(parent, color)
+    bar(parent, 11, 1.6, UDim2.fromScale(0.5, 0.5), 0, color)
+end
+
+function ICONS.close(parent, color)
+    bar(parent, 10, 1.6, UDim2.fromScale(0.5, 0.5), 45, color)
+    bar(parent, 1.6, 10, UDim2.fromScale(0.5, 0.5), 45, color)
+end
+
+function ICONS.sliders(parent, color)
+    bar(parent, 11, 1.5, UDim2.new(0.5, 0, 0.5, -4), 0, color)
+    bar(parent, 8, 1.5, UDim2.new(0.5, 0, 0.5, 0), 0, color)
+    bar(parent, 10, 1.5, UDim2.new(0.5, 0, 0.5, 4), 0, color)
+    bar(parent, 2.6, 2.6, UDim2.new(0.5, 2.5, 0.5, -4), 0, color)
+    bar(parent, 2.6, 2.6, UDim2.new(0.5, -2, 0.5, 0), 0, color)
+    bar(parent, 2.6, 2.6, UDim2.new(0.5, 1.5, 0.5, 4), 0, color)
+end
+
+function ICONS.back(parent, color)
+    bar(parent, 7.5, 1.6, UDim2.new(0.52, 0, 0.5, -3), 45, color)
+    bar(parent, 7.5, 1.6, UDim2.new(0.52, 0, 0.5, 3), -45, color)
+end
+
+function ICONS.arrowUp(parent, color)
+    bar(parent, 1.8, 13, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 7, 1.8, UDim2.new(0.5, -2.2, 0.5, -4), 40, color)
+    bar(parent, 7, 1.8, UDim2.new(0.5, 2.2, 0.5, -4), -40, color)
 end
 
 local function findGuiParent(compat)
@@ -90,6 +174,29 @@ local function splitFences(text)
     return parts
 end
 
+local function isInteractive(target)
+    local current = target
+    for _ = 1, 4 do
+        if not current then
+            return false
+        end
+        local ok, kind = pcall(function()
+            return current.ClassName
+        end)
+        if ok and (kind == "TextButton" or kind == "ImageButton" or kind == "TextBox") then
+            return true
+        end
+        local parentOk, parent = pcall(function()
+            return current.Parent
+        end)
+        if not parentOk then
+            return false
+        end
+        current = parent
+    end
+    return false
+end
+
 function UI.new(deps)
     local self = setmetatable({}, UI)
     self.config = deps.config
@@ -98,8 +205,18 @@ function UI.new(deps)
     self.order = 0
     self.running = false
     self.pendingApproval = nil
+    self.connections = {}
+    self.destroyed = false
+    self.baseScale = 1
     self:Build()
     return self
+end
+
+function UI:Track(connection)
+    if connection then
+        table.insert(self.connections, connection)
+    end
+    return connection
 end
 
 function UI:Build()
@@ -119,52 +236,47 @@ function UI:Build()
     end
     self.gui = gui
 
-    self.fab = create("TextButton", {
-        Name = "Fab",
-        Size = UDim2.fromOffset(58, 58),
-        Position = UDim2.new(1, -18, 1, -18),
-        AnchorPoint = Vector2.new(1, 1),
-        BackgroundColor3 = Theme.accent,
-        BorderSizePixel = 0,
-        Text = "AI",
-        Font = Theme.fontBold,
-        TextSize = 19,
-        TextColor3 = Color3.fromRGB(255, 255, 255),
-        AutoButtonColor = false,
-        Visible = false,
-    }, gui)
-    withCorner(self.fab, 29)
-    withStroke(self.fab, Color3.fromRGB(160, 140, 255), 1, 0.4)
-    self.fab.MouseButton1Click:Connect(function()
-        self:Toggle()
-    end)
+    self.basePosition = UDim2.new(1, -WINDOW_MARGIN, 1, -WINDOW_MARGIN)
 
     self.root = create("Frame", {
         Name = "Window",
-        Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT),
-        Position = UDim2.new(1, -16, 1, -16),
+        Size = UDim2.fromOffset(DESIGN_WIDTH, DESIGN_HEIGHT),
+        Position = self.basePosition,
         AnchorPoint = Vector2.new(1, 1),
         BackgroundColor3 = Theme.bg,
         BorderSizePixel = 0,
         ClipsDescendants = true,
     }, gui)
-    withCorner(self.root, 18)
-    withStroke(self.root, Theme.border, 1, 0.2)
+    withCorner(self.root, Theme.radiusWindow)
+    withStroke(self.root, Theme.line, 1, 0.25)
+
+    create("Frame", {
+        BackgroundColor3 = Theme.white,
+        BackgroundTransparency = 0.94,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 14, 0, 1),
+        Size = UDim2.new(1, -28, 0, 1),
+    }, self.root)
 
     self.scale = Instance.new("UIScale")
     self.scale.Parent = self.root
 
     self:BuildHeader()
+    self:BuildStatus()
     self:BuildChat()
-    self:BuildInput()
+    self:BuildComposer()
     self:BuildSettings()
+    self:BuildFab()
+    self:BuildPill()
+
     self:UpdateScale()
+    self:AnimateOpen()
 
     local camera = workspace.CurrentCamera
     if camera then
-        camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+        self:Track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
             self:UpdateScale()
-        end)
+        end))
     end
 end
 
@@ -172,25 +284,78 @@ function UI:UpdateScale()
     local camera = workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
     local scale = math.min(
-        1,
-        (viewport.X - 24) / WINDOW_WIDTH,
-        (viewport.Y - 24) / WINDOW_HEIGHT
+        (viewport.X - 16) / DESIGN_WIDTH,
+        (viewport.Y - 16) / DESIGN_HEIGHT,
+        1.15
     )
-    self.scale.Scale = Util.Clamp(scale, 0.62, 1)
+    self.baseScale = Util.Clamp(scale, 0.55, 1.15)
+    if self.scale then
+        self.scale.Scale = self.baseScale
+    end
+    self:ClampPosition()
+end
+
+function UI:ClampPosition()
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+    local width = DESIGN_WIDTH * self.baseScale
+    local height = DESIGN_HEIGHT * self.baseScale
+    local position = self.root.Position
+    local x = Util.Clamp(position.X.Offset, width + 8 - viewport.X, -8)
+    local y = Util.Clamp(position.Y.Offset, height + 8 - viewport.Y, -8)
+    self.root.Position = UDim2.new(1, x, 1, y)
+    self.basePosition = self.root.Position
+end
+
+function UI:AnimateOpen()
+    if not self.root or not self.root.Visible then
+        return
+    end
+    local target = self.baseScale
+    self.scale.Scale = target * 0.965
+    self.root.Position = UDim2.new(
+        self.basePosition.X.Scale,
+        self.basePosition.X.Offset,
+        self.basePosition.Y.Scale,
+        self.basePosition.Y.Offset + 10
+    )
+    tween(self.scale, { Scale = target }, 0.24, Enum.EasingStyle.Quint)
+    tween(self.root, { Position = self.basePosition }, 0.28, Enum.EasingStyle.Quint)
 end
 
 function UI:BuildHeader()
     local header = create("Frame", {
         Name = "Header",
-        Size = UDim2.new(1, 0, 0, 46),
+        Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
         BackgroundTransparency = 1,
     }, self.root)
     self.header = header
 
+    local logo = create("Frame", {
+        Size = UDim2.fromOffset(28, 28),
+        Position = UDim2.fromOffset(14, 13),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+    }, header)
+    withCorner(logo, 9)
+    withStroke(logo, Theme.white, 1, 0.82)
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new(Theme.accent, Theme.accentDeep)
+    gradient.Rotation = 45
+    gradient.Parent = logo
     create("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 14, 0, 0),
-        Size = UDim2.new(1, -130, 1, 0),
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 13,
+        TextColor3 = Theme.white,
+        Text = "W",
+    }, logo)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(50, 8),
+        Size = UDim2.new(1, -200, 0, 18),
         Font = Theme.fontBold,
         TextSize = 15,
         TextColor3 = Theme.text,
@@ -198,20 +363,50 @@ function UI:BuildHeader()
         Text = "WrenchAi",
     }, header)
 
-    local function headerButton(text, xOffset, width, callback)
+    self.modelChip = create("TextButton", {
+        Position = UDim2.fromOffset(50, 28),
+        Size = UDim2.fromOffset(10, 16),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundColor3 = Theme.surfaceAlt,
+        BorderSizePixel = 0,
+        Font = Theme.fontCode,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Text = Util.Truncate(tostring(self.config.model or "model"), 22),
+        AutoButtonColor = false,
+    }, header)
+    withCorner(self.modelChip, 5)
+    withPadding(self.modelChip, 0, 6, 0, 6)
+    self.modelChip.MouseButton1Click:Connect(function()
+        self:OpenSettings()
+    end)
+
+    local function headerButton(offset, icon, callback)
         local button = create("TextButton", {
-            Size = UDim2.fromOffset(width or 28, 28),
-            Position = UDim2.new(1, xOffset, 0, 9),
-            BackgroundColor3 = Theme.panelAlt,
-            BackgroundTransparency = 0.2,
+            Size = UDim2.fromOffset(30, 30),
+            Position = UDim2.new(1, offset, 0, 12),
+            AnchorPoint = Vector2.new(1, 0),
+            BackgroundColor3 = Theme.surfaceAlt,
+            BackgroundTransparency = 1,
             BorderSizePixel = 0,
-            Text = text,
-            Font = Theme.fontBold,
-            TextSize = 11,
-            TextColor3 = Theme.text,
+            Text = "",
             AutoButtonColor = false,
         }, header)
-        withCorner(button, 8)
+        withCorner(button, 9)
+        local holder = create("Frame", {
+            Size = UDim2.fromOffset(14, 14),
+            Position = UDim2.fromScale(0.5, 0.5),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+        }, button)
+        ICONS[icon](holder, Theme.muted)
+        button.MouseEnter:Connect(function()
+            tween(button, { BackgroundTransparency = 0 }, 0.14)
+        end)
+        button.MouseLeave:Connect(function()
+            tween(button, { BackgroundTransparency = 1 }, 0.14)
+        end)
         button.MouseButton1Click:Connect(function()
             if callback then
                 pcall(callback)
@@ -220,73 +415,38 @@ function UI:BuildHeader()
         return button
     end
 
-    self.closeButton = headerButton("X", -38, 28, function()
-        self.root.Visible = false
-        self.fab.Visible = true
+    self.closeButton = headerButton(-14, "close", function()
+        self:Hide()
     end)
-    headerButton("CFG", -70, 30, function()
+    self.minimizeButton = headerButton(-50, "minus", function()
+        self:Minimize()
+    end)
+    headerButton(-86, "sliders", function()
         self:OpenSettings()
     end)
-    self.newButton = headerButton("+", -104, 30, function()
+    self.newButton = headerButton(-122, "plus", function()
         if self.callbacks.onNewChat then
             pcall(self.callbacks.onNewChat)
         end
     end)
 
-    self.status = create("TextLabel", {
-        BackgroundTransparency = 1,
-        Position = UDim2.new(0, 14, 0, 46),
-        Size = UDim2.new(1, -70, 0, 18),
-        Font = Theme.font,
-        TextSize = 11,
-        TextColor3 = Theme.muted,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Ready",
-    }, self.root)
-
-    self.stopButton = create("TextButton", {
-        BackgroundTransparency = 1,
-        Position = UDim2.new(1, -58, 0, 44),
-        Size = UDim2.fromOffset(46, 20),
-        Text = "STOP",
-        Font = Theme.fontBold,
-        TextSize = 10,
-        TextColor3 = Theme.err,
-        Visible = false,
-        AutoButtonColor = false,
-    }, self.root)
-    self.stopButton.MouseButton1Click:Connect(function()
-        if self.callbacks.onStop then
-            pcall(self.callbacks.onStop)
-        end
-        self:SetStatus("Stopping...", Theme.warn)
-    end)
-
-    create("Frame", {
-        BackgroundColor3 = Theme.border,
-        BackgroundTransparency = 0.4,
-        BorderSizePixel = 0,
-        Position = UDim2.new(0, 12, 0, 66),
-        Size = UDim2.new(1, -24, 0, 1),
-    }, self.root)
-
     local dragging = false
     local dragStart = nil
-    local startPosition = nil
+    local startOffset = nil
     header.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
             and input.UserInputType ~= Enum.UserInputType.Touch then
             return
         end
-        local targetOk, target = pcall(function()
+        local ok, target = pcall(function()
             return input.Target
         end)
-        if targetOk and target and target:IsA("TextButton") then
+        if ok and isInteractive(target) then
             return
         end
         dragging = true
         dragStart = input.Position
-        startPosition = self.root.Position
+        startOffset = Vector2.new(self.root.Position.X.Offset, self.root.Position.Y.Offset)
     end)
     header.InputChanged:Connect(function(input)
         if not dragging then
@@ -296,20 +456,72 @@ function UI:BuildHeader()
             and input.UserInputType ~= Enum.UserInputType.Touch then
             return
         end
-        local delta = input.Position - dragStart
+        local delta = (input.Position - dragStart) / self.baseScale
         self.root.Position = UDim2.new(
-            startPosition.X.Scale,
-            startPosition.X.Offset + delta.X,
-            startPosition.Y.Scale,
-            startPosition.Y.Offset + delta.Y
+            1,
+            startOffset.X + delta.X,
+            1,
+            startOffset.Y + delta.Y
         )
     end)
     header.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
+            if dragging then
+                dragging = false
+                self:ClampPosition()
+            end
         end
     end)
+end
+
+function UI:BuildStatus()
+    self.statusDot = create("Frame", {
+        Size = UDim2.fromOffset(6, 6),
+        Position = UDim2.fromOffset(14, 86),
+        BackgroundColor3 = Theme.faint,
+        BorderSizePixel = 0,
+    }, self.root)
+    withCorner(self.statusDot, 3)
+
+    self.status = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(26, 78),
+        Size = UDim2.new(1, -110, 0, STATUS_HEIGHT),
+        Font = Theme.font,
+        TextSize = 10,
+        TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Ready",
+    }, self.root)
+
+    self.stopButton = create("TextButton", {
+        Size = UDim2.fromOffset(52, 20),
+        Position = UDim2.new(1, -14, 0, 79),
+        AnchorPoint = Vector2.new(1, 0),
+        BackgroundColor3 = Theme.errFill,
+        BorderSizePixel = 0,
+        Text = "Stop",
+        Font = Theme.fontBold,
+        TextSize = 10,
+        TextColor3 = Theme.err,
+        AutoButtonColor = false,
+        Visible = false,
+    }, self.root)
+    withCorner(self.stopButton, 10)
+    self.stopButton.MouseButton1Click:Connect(function()
+        if self.callbacks.onStop then
+            pcall(self.callbacks.onStop)
+        end
+        self:SetStatus("Stopping", Theme.warn)
+    end)
+
+    create("Frame", {
+        BackgroundColor3 = Theme.lineSoft,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 12, 0, 76),
+        Size = UDim2.new(1, -24, 0, 1),
+    }, self.root)
 end
 
 function UI:BuildChat()
@@ -317,44 +529,135 @@ function UI:BuildChat()
         Name = "Chat",
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Position = UDim2.new(0, 8, 0, 72),
-        Size = UDim2.new(1, -16, 1, -72 - 96),
-        ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.border,
+        Position = UDim2.new(0, 0, 0, CHAT_TOP),
+        Size = UDim2.new(1, 0, 1, -CHAT_TOP - 82),
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.line,
         ScrollingDirection = Enum.ScrollingDirection.Y,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ClipsDescendants = true,
     }, self.root)
     self.scroll = scroll
-
-    create("UIListLayout", {
-        Padding = UDim.new(0, 8),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, scroll)
-    withPadding(scroll, 0, 4, 8, 4)
+    withList(scroll, 10)
+    withPadding(scroll, 8, 14, 14, 14)
+    self:BuildHero()
 end
 
-function UI:BuildInput()
+function UI:BuildHero()
+    local hero = create("Frame", {
+        Name = "Hero",
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 322),
+        LayoutOrder = 0,
+    }, self.scroll)
+    self.hero = hero
+
+    local logo = create("Frame", {
+        Size = UDim2.fromOffset(46, 46),
+        Position = UDim2.new(0.5, 0, 0, 54),
+        AnchorPoint = Vector2.new(0.5, 0),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+    }, hero)
+    withCorner(logo, 14)
+    withStroke(logo, Theme.white, 1, 0.8)
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new(Theme.accent, Theme.accentDeep)
+    gradient.Rotation = 45
+    gradient.Parent = logo
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 20,
+        TextColor3 = Theme.white,
+        Text = "W",
+    }, logo)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0, 0, 0, 116),
+        Size = UDim2.new(1, 0, 0, 24),
+        Font = Theme.fontBold,
+        TextSize = 17,
+        TextColor3 = Theme.text,
+        Text = "How can I help?",
+    }, hero)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0.5, 0, 0, 144),
+        Size = UDim2.new(1, -60, 0, 34),
+        AnchorPoint = Vector2.new(0.5, 0),
+        Font = Theme.font,
+        TextSize = 11,
+        TextColor3 = Theme.faint,
+        TextWrapped = true,
+        Text = "I can inspect the game, read scripts, drive GUIs and run Luau with your approval.",
+    }, hero)
+
+    local prompts = {
+        "What game is this and what can you see?",
+        "List the LocalScripts in this game",
+        "Show me the remote events firing",
+    }
+    for index, prompt in ipairs(prompts) do
+        local chip = create("TextButton", {
+            Size = UDim2.new(1, -40, 0, 34),
+            Position = UDim2.new(0.5, 0, 0, 190 + (index - 1) * 42),
+            AnchorPoint = Vector2.new(0.5, 0),
+            BackgroundColor3 = Theme.surface,
+            BorderSizePixel = 0,
+            Text = prompt,
+            Font = Theme.fontMedium,
+            TextSize = 11,
+            TextColor3 = Theme.muted,
+            AutoButtonColor = false,
+        }, hero)
+        withCorner(chip, 12)
+        withStroke(chip, Theme.lineSoft, 1, 0.3)
+        chip.MouseEnter:Connect(function()
+            tween(chip, { BackgroundColor3 = Theme.surfaceHi }, 0.14)
+        end)
+        chip.MouseLeave:Connect(function()
+            tween(chip, { BackgroundColor3 = Theme.surface }, 0.14)
+        end)
+        chip.MouseButton1Click:Connect(function()
+            self.input.Text = prompt
+            self:Submit()
+        end)
+    end
+end
+
+function UI:HideHero()
+    if self.hero and self.hero.Visible then
+        self.hero.Visible = false
+        self.hero.Size = UDim2.new(1, 0, 0, 0)
+    end
+end
+
+function UI:BuildComposer()
     local frame = create("Frame", {
-        Name = "Input",
-        Position = UDim2.new(0, 10, 1, -88),
-        Size = UDim2.new(1, -20, 0, 78),
-        BackgroundColor3 = Theme.panel,
+        Name = "Composer",
+        Position = UDim2.new(0, 12, 1, -72),
+        Size = UDim2.new(1, -24, 0, COMPOSER_HEIGHT),
+        BackgroundColor3 = Theme.surface,
         BorderSizePixel = 0,
     }, self.root)
-    withCorner(frame, 12)
-    withStroke(frame, Theme.border, 1, 0.3)
+    withCorner(frame, 16)
+    self.composerStroke = withStroke(frame, Theme.line, 1, 0.25)
+    self.composer = frame
 
     self.input = create("TextBox", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 12, 0, 8),
-        Size = UDim2.new(1, -84, 1, -16),
+        Position = UDim2.new(0, 14, 0, 8),
+        Size = UDim2.new(1, -66, 1, -16),
         Font = Theme.font,
         TextSize = 13,
         TextColor3 = Theme.text,
-        PlaceholderText = "Ask about this game...",
-        PlaceholderColor3 = Theme.muted,
+        PlaceholderText = "Ask WrenchAi anything...",
+        PlaceholderColor3 = Theme.faint,
         TextWrapped = true,
         MultiLine = true,
         ClearTextOnFocus = false,
@@ -364,44 +667,83 @@ function UI:BuildInput()
     }, frame)
 
     self.sendButton = create("TextButton", {
-        Position = UDim2.new(1, -64, 0, 8),
-        Size = UDim2.fromOffset(54, 62),
+        Size = UDim2.fromOffset(34, 34),
+        Position = UDim2.new(1, -10, 0.5, 0),
+        AnchorPoint = Vector2.new(1, 0.5),
         BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0,
-        Text = "Send",
-        Font = Theme.fontBold,
-        TextSize = 12,
-        TextColor3 = Color3.fromRGB(255, 255, 255),
+        Text = "",
         AutoButtonColor = false,
     }, frame)
-    withCorner(self.sendButton, 10)
+    withCorner(self.sendButton, 17)
+
+    self.sendIcon = create("Frame", {
+        Size = UDim2.fromOffset(32, 32),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+    }, self.sendButton)
+    ICONS.arrowUp(self.sendIcon, Theme.white)
+
+    self.stopIcon = create("Frame", {
+        Size = UDim2.fromOffset(9, 9),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = Theme.white,
+        BorderSizePixel = 0,
+        Visible = false,
+    }, self.sendButton)
+    withCorner(self.stopIcon, 2)
+
+    self.sendButton.MouseEnter:Connect(function()
+        tween(self.sendButton, { BackgroundColor3 = Theme.accentDeep }, 0.14)
+    end)
+    self.sendButton.MouseLeave:Connect(function()
+        tween(self.sendButton, { BackgroundColor3 = Theme.accent }, 0.14)
+    end)
     self.sendButton.MouseButton1Click:Connect(function()
         self:Submit()
     end)
 
-    if UserInputService.TouchEnabled then
-        self.input.Focused:Connect(function()
+    self.input.Focused:Connect(function()
+        tween(self.composerStroke, { Color = Theme.accent, Transparency = 0.45 }, 0.16)
+        if UserInputService.TouchEnabled then
             self.preFocusPosition = self.root.Position
-            local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
-            local lift = math.clamp(viewport.Y * 0.42, 180, 340)
-            self.root.Position = UDim2.new(
-                self.preFocusPosition.X.Scale,
-                self.preFocusPosition.X.Offset,
-                self.preFocusPosition.Y.Scale,
-                self.preFocusPosition.Y.Offset - lift
+            local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+                or Vector2.new(1280, 720)
+            local lift = math.clamp(viewport.Y * 0.42, 180, 360)
+            local position = self.preFocusPosition
+            local target = UDim2.new(
+                position.X.Scale,
+                position.X.Offset,
+                position.Y.Scale,
+                position.Y.Offset - lift
             )
-        end)
-    end
+            tween(self.root, { Position = target }, 0.22, Enum.EasingStyle.Quint)
+        end
+    end)
 
     self.input.FocusLost:Connect(function(enterPressed)
+        tween(self.composerStroke, { Color = Theme.line, Transparency = 0.25 }, 0.16)
         if self.preFocusPosition then
-            self.root.Position = self.preFocusPosition
+            tween(self.root, { Position = self.preFocusPosition }, 0.22, Enum.EasingStyle.Quint)
             self.preFocusPosition = nil
         end
         if enterPressed and not UserInputService.TouchEnabled then
             self:Submit()
         end
     end)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0, 16, 1, -14),
+        Size = UDim2.new(1, -32, 0, 12),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = UserInputService.TouchEnabled and "Tap the arrow to send" or "Enter to send",
+    }, self.root)
 end
 
 function UI:BuildSettings()
@@ -412,56 +754,85 @@ function UI:BuildSettings()
         BorderSizePixel = 0,
         Visible = false,
         ZIndex = 10,
+        ClipsDescendants = true,
     }, self.root)
-    withCorner(frame, 18)
+    withCorner(frame, Theme.radiusWindow)
     self.settingsFrame = frame
+
+    local back = create("TextButton", {
+        Size = UDim2.fromOffset(30, 30),
+        Position = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Theme.surfaceAlt,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, frame)
+    withCorner(back, 9)
+    local backIcon = create("Frame", {
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+    }, back)
+    ICONS.back(backIcon, Theme.muted)
+    back.MouseEnter:Connect(function()
+        tween(back, { BackgroundTransparency = 0 }, 0.14)
+    end)
+    back.MouseLeave:Connect(function()
+        tween(back, { BackgroundTransparency = 1 }, 0.14)
+    end)
+    back.MouseButton1Click:Connect(function()
+        frame.Visible = false
+    end)
 
     create("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 16, 0, 0),
-        Size = UDim2.new(1, -60, 0, 46),
+        Position = UDim2.fromOffset(52, 8),
+        Size = UDim2.new(1, -70, 0, 20),
         Font = Theme.fontBold,
         TextSize = 15,
         TextColor3 = Theme.text,
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = "Settings",
-        ZIndex = 11,
+        ZIndex = 12,
+    }, frame)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(52, 28),
+        Size = UDim2.new(1, -70, 0, 14),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Connection, agent behaviour and tools",
+        ZIndex = 12,
     }, frame)
 
-    local closeButton = create("TextButton", {
-        Position = UDim2.new(1, -38, 0, 9),
-        Size = UDim2.fromOffset(28, 28),
-        BackgroundColor3 = Theme.panelAlt,
+    create("Frame", {
+        BackgroundColor3 = Theme.lineSoft,
         BorderSizePixel = 0,
-        Text = "X",
-        Font = Theme.fontBold,
-        TextSize = 11,
-        TextColor3 = Theme.text,
-        AutoButtonColor = false,
-        ZIndex = 11,
+        Position = UDim2.new(0, 12, 0, 54),
+        Size = UDim2.new(1, -24, 0, 1),
+        ZIndex = 12,
     }, frame)
-    withCorner(closeButton, 8)
-    closeButton.MouseButton1Click:Connect(function()
-        frame.Visible = false
-    end)
 
     local content = create("ScrollingFrame", {
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Position = UDim2.new(0, 12, 0, 50),
-        Size = UDim2.new(1, -24, 1, -112),
-        ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.border,
+        Position = UDim2.fromOffset(0, 60),
+        Size = UDim2.new(1, 0, 1, -60 - 66),
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.line,
         ScrollingDirection = Enum.ScrollingDirection.Y,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ZIndex = 11,
     }, frame)
-    create("UIListLayout", {
-        Padding = UDim.new(0, 6),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, content)
-    withPadding(content, 0, 0, 70, 0)
+    withList(content, 8)
+    withPadding(content, 4, 16, 18, 16)
+    self.settingsContent = content
 
     local order = 0
     local function nextOrder()
@@ -469,34 +840,48 @@ function UI:BuildSettings()
         return order
     end
 
-    local function addField(titleText, value, placeholder, multiline)
-        local height = multiline and 96 or 52
+    local function section(titleText)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 16),
+            LayoutOrder = nextOrder(),
+            Font = Theme.fontBold,
+            TextSize = 9,
+            TextColor3 = Theme.faint,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = string.upper(titleText),
+            ZIndex = 11,
+        }, content)
+    end
+
+    local function field(titleText, value, placeholder, multiline)
+        local height = multiline and 96 or 56
         local holder = create("Frame", {
             BackgroundTransparency = 1,
-            Size = UDim2.new(1, -6, 0, height),
+            Size = UDim2.new(1, 0, 0, height),
             LayoutOrder = nextOrder(),
             ZIndex = 11,
         }, content)
         create("TextLabel", {
             BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 16),
+            Size = UDim2.new(1, 0, 0, 14),
             Font = Theme.fontMedium,
-            TextSize = 11,
+            TextSize = 10,
             TextColor3 = Theme.muted,
             TextXAlignment = Enum.TextXAlignment.Left,
             Text = titleText,
             ZIndex = 11,
         }, holder)
         local box = create("TextBox", {
-            Position = UDim2.new(0, 0, 0, 18),
-            Size = UDim2.new(1, 0, 0, multiline and 72 or 30),
-            BackgroundColor3 = Theme.panelAlt,
+            Position = UDim2.new(0, 0, 0, 16),
+            Size = UDim2.new(1, 0, 0, multiline and 70 or 38),
+            BackgroundColor3 = Theme.surfaceAlt,
             BorderSizePixel = 0,
             Font = Theme.font,
             TextSize = 12,
             TextColor3 = Theme.text,
             PlaceholderText = placeholder or "",
-            PlaceholderColor3 = Theme.muted,
+            PlaceholderColor3 = Theme.faint,
             TextWrapped = multiline,
             MultiLine = multiline,
             ClearTextOnFocus = false,
@@ -505,40 +890,83 @@ function UI:BuildSettings()
             Text = value or "",
             ZIndex = 11,
         }, holder)
-        withCorner(box, 6)
-        withPadding(box, multiline and 6 or 0, 8, multiline and 6 or 0, 8)
+        withCorner(box, 10)
+        local stroke = withStroke(box, Theme.lineSoft, 1, 0.25)
+        withPadding(box, multiline and 8 or 0, 10, multiline and 8 or 0, 10)
+        box.Focused:Connect(function()
+            tween(stroke, { Color = Theme.accent, Transparency = 0.35 }, 0.16)
+            tween(box, { BackgroundColor3 = Theme.surfaceHi }, 0.16)
+        end)
+        box.FocusLost:Connect(function()
+            tween(stroke, { Color = Theme.lineSoft, Transparency = 0.25 }, 0.16)
+            tween(box, { BackgroundColor3 = Theme.surfaceAlt }, 0.16)
+        end)
         return box
     end
 
-    self.settingBaseURL = addField("Base URL", self.config.baseURL, "https://api.refuseless.com/v1")
-    self.settingModel = addField("Model", self.config.model, "glm-5.3-abliterated")
-    self.settingKey = addField("API key (stored on this device only)", self.config.apiKey, "sk-...")
-    self.settingTemperature = addField("Temperature", tostring(self.config.temperature), "0.7")
-    self.settingSteps = addField("Max agent steps", tostring(self.config.maxSteps), "12")
-    self.settingCobalt = addField("Cobalt URL", self.config.cobaltURL, "")
-    self.settingDex = addField("Dex URL", self.config.dexURL, "")
-    self.settingExtra = addField("Extra system prompt", self.config.extraSystemPrompt, "Optional", true)
+    section("Connection")
+    self.settingBaseURL = field("Base URL", self.config.baseURL, "https://api.refuseless.com/v1")
+    self.settingModel = field("Model", self.config.model, "glm-5.3-abliterated")
+    self.settingKey = field("API key (stored on this device)", self.config.apiKey, "sk-...")
 
-    local toggleHolder = create("Frame", {
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, -6, 0, 40),
+    section("Agent")
+    self.settingTemperature = field("Temperature", tostring(self.config.temperature), "0.7")
+    self.settingSteps = field("Max agent steps", tostring(self.config.maxSteps), "12")
+    self.settingExtra = field("Extra system prompt", self.config.extraSystemPrompt, "Optional", true)
+
+    section("Tools")
+    self.settingCobalt = field("Cobalt URL", self.config.cobaltURL, "")
+    self.settingDex = field("Dex URL", self.config.dexURL, "")
+
+    section("Permissions")
+    local toggleRow = create("Frame", {
+        BackgroundColor3 = Theme.surface,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 50),
         LayoutOrder = nextOrder(),
         ZIndex = 11,
     }, content)
+    withCorner(toggleRow, 12)
+    withStroke(toggleRow, Theme.lineSoft, 1, 0.3)
+
     self.autoApproveButton = create("TextButton", {
-        Size = UDim2.new(1, 0, 0, 38),
-        BackgroundColor3 = Theme.panelAlt,
-        BorderSizePixel = 0,
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, toggleRow)
+
+    self.autoApproveLabel = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 0),
+        Size = UDim2.new(1, -72, 1, 0),
         Font = Theme.fontMedium,
         TextSize = 11,
         TextColor3 = Theme.text,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "",
-        AutoButtonColor = false,
-        ZIndex = 11,
-    }, toggleHolder)
-    withCorner(self.autoApproveButton, 6)
-    withPadding(self.autoApproveButton, 0, 10, 0, 10)
+        Text = "Always allow run_luau",
+        ZIndex = 12,
+    }, toggleRow)
+
+    self.switchTrack = create("Frame", {
+        Size = UDim2.fromOffset(40, 22),
+        Position = UDim2.new(1, -12, 0.5, 0),
+        AnchorPoint = Vector2.new(1, 0.5),
+        BackgroundColor3 = Theme.surfaceHi,
+        BorderSizePixel = 0,
+        ZIndex = 12,
+    }, toggleRow)
+    withCorner(self.switchTrack, 11)
+    self.switchKnob = create("Frame", {
+        Size = UDim2.fromOffset(16, 16),
+        Position = UDim2.fromOffset(3, 3),
+        BackgroundColor3 = Theme.muted,
+        BorderSizePixel = 0,
+        ZIndex = 13,
+    }, self.switchTrack)
+    withCorner(self.switchKnob, 8)
+
     self.pendingAutoApprove = self.config.autoApproveScripts == true
     self.autoApproveButton.MouseButton1Click:Connect(function()
         self.pendingAutoApprove = not self.pendingAutoApprove
@@ -548,11 +976,12 @@ function UI:BuildSettings()
 
     self.settingsStatus = create("TextLabel", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -6, 0, 34),
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
         LayoutOrder = nextOrder(),
         Font = Theme.font,
-        TextSize = 10,
-        TextColor3 = Theme.muted,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
@@ -561,27 +990,163 @@ function UI:BuildSettings()
     }, content)
 
     local saveButton = create("TextButton", {
-        Position = UDim2.new(0, 12, 1, -52),
-        Size = UDim2.new(1, -24, 0, 38),
+        Position = UDim2.new(0, 14, 1, -54),
+        Size = UDim2.new(1, -28, 0, 40),
         BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0,
         Text = "Save settings",
         Font = Theme.fontBold,
         TextSize = 12,
-        TextColor3 = Color3.fromRGB(255, 255, 255),
+        TextColor3 = Theme.white,
         AutoButtonColor = false,
-        ZIndex = 11,
+        ZIndex = 12,
     }, frame)
-    withCorner(saveButton, 10)
+    withCorner(saveButton, 13)
+    saveButton.MouseEnter:Connect(function()
+        tween(saveButton, { BackgroundColor3 = Theme.accentDeep }, 0.14)
+    end)
+    saveButton.MouseLeave:Connect(function()
+        tween(saveButton, { BackgroundColor3 = Theme.accent }, 0.14)
+    end)
     saveButton.MouseButton1Click:Connect(function()
         self:SaveSettings()
     end)
 end
 
+function UI:BuildFab()
+    self.fab = create("TextButton", {
+        Name = "Fab",
+        Size = UDim2.fromOffset(58, 58),
+        Position = UDim2.new(1, -18, 1, -18),
+        AnchorPoint = Vector2.new(1, 1),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        Visible = false,
+    }, self.gui)
+    withCorner(self.fab, 29)
+    withStroke(self.fab, Theme.white, 1, 0.8)
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = ColorSequence.new(Theme.accent, Theme.accentDeep)
+    gradient.Rotation = 45
+    gradient.Parent = self.fab
+
+    local ring = create("Frame", {
+        Size = UDim2.fromOffset(58, 58),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 0,
+    }, self.fab)
+    withCorner(ring, 29)
+    local ringStroke = withStroke(ring, Theme.accent, 1.5, 0.55)
+    tween(ringStroke, { Transparency = 1 }, 1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+
+    local icon = create("Frame", {
+        Size = UDim2.fromOffset(28, 28),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+        ZIndex = 2,
+    }, self.fab)
+    ICONS.plus(icon, Theme.white)
+
+    self.fab.MouseButton1Click:Connect(function()
+        self:Show()
+    end)
+    self.fab.MouseEnter:Connect(function()
+        tween(self.fab, { BackgroundColor3 = Theme.accentDeep }, 0.14)
+    end)
+    self.fab.MouseLeave:Connect(function()
+        tween(self.fab, { BackgroundColor3 = Theme.accent }, 0.14)
+    end)
+end
+
+function UI:BuildPill()
+    local pill = create("TextButton", {
+        Name = "Minimized",
+        Size = UDim2.fromOffset(182, 44),
+        Position = UDim2.new(1, -18, 1, -18),
+        AnchorPoint = Vector2.new(1, 1),
+        BackgroundColor3 = Theme.surface,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        Visible = false,
+    }, self.gui)
+    withCorner(pill, 22)
+    withStroke(pill, Theme.line, 1, 0.3)
+    self.pill = pill
+
+    local logo = create("Frame", {
+        Size = UDim2.fromOffset(24, 24),
+        Position = UDim2.fromOffset(10, 10),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+    }, pill)
+    withCorner(logo, 8)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 11,
+        TextColor3 = Theme.white,
+        Text = "W",
+    }, logo)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(42, 6),
+        Size = UDim2.new(1, -52, 0, 16),
+        Font = Theme.fontBold,
+        TextSize = 11,
+        TextColor3 = Theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "WrenchAi",
+    }, pill)
+
+    self.pillStatusDot = create("Frame", {
+        Size = UDim2.fromOffset(5, 5),
+        Position = UDim2.fromOffset(43, 27),
+        BackgroundColor3 = Theme.faint,
+        BorderSizePixel = 0,
+    }, pill)
+    withCorner(self.pillStatusDot, 3)
+
+    self.pillStatus = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(53, 20),
+        Size = UDim2.new(1, -63, 0, 14),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Ready",
+    }, pill)
+
+    pill.MouseButton1Click:Connect(function()
+        self:Show()
+    end)
+end
+
 function UI:UpdateAutoApproveLabel()
-    local state = self.pendingAutoApprove and "ON" or "OFF"
-    self.autoApproveButton.Text = "Always allow run_luau without asking: " .. state
-    self.autoApproveButton.TextColor3 = self.pendingAutoApprove and Theme.warn or Theme.text
+    local enabled = self.pendingAutoApprove == true
+    if self.autoApproveLabel then
+        self.autoApproveLabel.TextColor3 = enabled and Theme.text or Theme.muted
+    end
+    if self.switchTrack then
+        tween(self.switchTrack, {
+            BackgroundColor3 = enabled and Theme.accent or Theme.surfaceHi,
+        }, 0.18)
+    end
+    if self.switchKnob then
+        tween(self.switchKnob, {
+            Position = UDim2.fromOffset(enabled and 21 or 3, 3),
+            BackgroundColor3 = enabled and Theme.white or Theme.muted,
+        }, 0.18, Enum.EasingStyle.Quint)
+    end
 end
 
 function UI:DiagnosticsText()
@@ -595,7 +1160,7 @@ function UI:DiagnosticsText()
         .. info.environment
         .. ")\nAvailable: "
         .. Util.Truncate(available, 420)
-        .. "\nAPI key and settings are written to WrenchAi/config.json when writefile exists."
+        .. "\nSettings are written to WrenchAi/config.json when writefile exists."
 end
 
 function UI:OpenSettings()
@@ -610,7 +1175,14 @@ function UI:OpenSettings()
     self.pendingAutoApprove = self.config.autoApproveScripts == true
     self:UpdateAutoApproveLabel()
     self.settingsStatus.Text = self:DiagnosticsText()
+    self.settingsStatus.TextColor3 = Theme.faint
+
+    if not self.root.Visible then
+        self:Show()
+    end
     self.settingsFrame.Visible = true
+    self.settingsFrame.Position = UDim2.new(1, DESIGN_WIDTH, 0, 0)
+    tween(self.settingsFrame, { Position = UDim2.new(0, 0, 0, 0) }, 0.22, Enum.EasingStyle.Quint)
 end
 
 function UI:SaveSettings()
@@ -647,30 +1219,98 @@ function UI:SaveSettings()
         end
     end
     self.config = newConfig
+    if self.modelChip then
+        self.modelChip.Text = Util.Truncate(model, 22)
+    end
     self.settingsStatus.Text = message
     self.settingsStatus.TextColor3 = ok and Theme.ok or Theme.err
 end
 
 function UI:SetStatus(text, color)
-    self.status.Text = text or ""
-    self.status.TextColor3 = color or Theme.muted
+    if self.status then
+        self.status.Text = text or ""
+        self.status.TextColor3 = color or Theme.muted
+    end
+    if self.statusDot then
+        self.statusDot.BackgroundColor3 = color or Theme.faint
+    end
+    if self.pillStatus then
+        self.pillStatus.Text = text or "Ready"
+        self.pillStatus.TextColor3 = color or Theme.faint
+    end
+    if self.pillStatusDot then
+        self.pillStatusDot.BackgroundColor3 = color or Theme.faint
+    end
 end
 
 function UI:SetRunning(running)
     self.running = running
     self.sendButton.Active = not running
-    self.sendButton.BackgroundTransparency = running and 0.55 or 0
-    self.sendButton.Text = running and "..." or "Send"
+    self.sendButton.BackgroundTransparency = running and 0.35 or 0
+    self.sendIcon.Visible = not running
+    self.stopIcon.Visible = running
     self.stopButton.Visible = running
     if self.newButton then
         self.newButton.Active = not running
         self.newButton.TextTransparency = running and 0.5 or 0
     end
+    if self.statusPulse then
+        pcall(function()
+            self.statusPulse:Cancel()
+        end)
+        self.statusPulse = nil
+    end
+    if self.statusDot then
+        self.statusDot.BackgroundTransparency = 0
+        if running then
+            self.statusPulse = tween(self.statusDot, { BackgroundTransparency = 0.65 }, 0.7,
+                Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+        end
+    end
+end
+
+function UI:Show()
+    self.root.Visible = true
+    self.fab.Visible = false
+    self.pill.Visible = false
+    self:AnimateOpen()
+end
+
+function UI:Hide()
+    self.root.Visible = false
+    self.fab.Visible = true
+    self.fab.Size = UDim2.fromOffset(40, 40)
+    tween(self.fab, { Size = UDim2.fromOffset(58, 58) }, 0.24, Enum.EasingStyle.Back)
+end
+
+function UI:Minimize()
+    if not self.root.Visible then
+        return
+    end
+    local position = self.root.Position
+    tween(self.scale, { Scale = self.baseScale * 0.9 }, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    tween(self.root, {
+        Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + 26),
+    }, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    task.delay(0.18, function()
+        if self.destroyed then
+            return
+        end
+        self.root.Visible = false
+        self.scale.Scale = self.baseScale
+        self.root.Position = self.basePosition
+        self.pill.Visible = true
+        self.pill.Size = UDim2.fromOffset(150, 40)
+        tween(self.pill, { Size = UDim2.fromOffset(182, 44) }, 0.22, Enum.EasingStyle.Back)
+    end)
 end
 
 function UI:Toggle()
-    self.root.Visible = not self.root.Visible
-    self.fab.Visible = not self.root.Visible
+    if self.root.Visible then
+        self:Hide()
+    else
+        self:Show()
+    end
 end
 
 function UI:Submit()
@@ -691,30 +1331,38 @@ end
 
 function UI:ClearMessages()
     for _, child in ipairs(self.scroll:GetChildren()) do
-        if not child:IsA("UIListLayout") then
+        if child ~= self.hero and not child:IsA("UIListLayout") then
             child:Destroy()
         end
     end
     self.order = 0
+    if self.hero then
+        self.hero.Visible = true
+        self.hero.Size = UDim2.new(1, 0, 0, 322)
+    end
 end
 
 function UI:ScrollToBottom()
     task.defer(function()
         task.wait()
+        if self.destroyed then
+            return
+        end
         local ok, canvas = pcall(function()
             return self.scroll.AbsoluteCanvasSize
         end)
         if ok and canvas then
-            self.scroll.CanvasPosition = Vector2.new(0, math.max(0, canvas.Y))
+            tween(self.scroll, { CanvasPosition = Vector2.new(0, math.max(0, canvas.Y)) }, 0.18)
         end
     end)
 end
 
 function UI:NewRow()
     self.order += 1
+    self:HideHero()
     return create("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -6, 0, 0),
+        Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         LayoutOrder = self.order,
     }, self.scroll)
@@ -723,57 +1371,112 @@ end
 function UI:AddMessage(role, text)
     local row = self:NewRow()
     local isUser = role == "user"
-    local bubble = create("Frame", {
-        BackgroundColor3 = isUser and Theme.user or Theme.panel,
-        BackgroundTransparency = isUser and 0 or 0.15,
-        BorderSizePixel = 0,
-        Size = UDim2.new(isUser and 0.9 or 0.98, 0, 0, 0),
-        Position = isUser and UDim2.new(1, 0, 0, 0) or UDim2.new(0, 0, 0, 0),
-        AnchorPoint = isUser and Vector2.new(1, 0) or Vector2.new(0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-    }, row)
-    withCorner(bubble, 10)
-    withStroke(bubble, isUser and Theme.border or Theme.panelAlt, 1, 0.5)
-    withPadding(bubble, 9, 12, 9, 12)
-    create("UIListLayout", {
-        Padding = UDim.new(0, 4),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, bubble)
 
-    if not isUser then
+    if isUser then
+        local holder = create("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+        }, row)
+        local bubble = create("Frame", {
+            BackgroundColor3 = Theme.user,
+            BorderSizePixel = 0,
+            Size = UDim2.new(0.88, 0, 0, 0),
+            Position = UDim2.new(1, 0, 0, 0),
+            AnchorPoint = Vector2.new(1, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+        }, holder)
+        withCorner(bubble, 16)
+        withPadding(bubble, 10, 14, 10, 14)
         create("TextLabel", {
             BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 12),
-            Font = Theme.fontBold,
-            TextSize = 9,
-            TextColor3 = Theme.accent,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            Font = Theme.font,
+            TextSize = 13,
+            TextColor3 = Theme.text,
+            TextWrapped = true,
             TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "WrenchAi",
+            TextYAlignment = Enum.TextYAlignment.Top,
+            LineHeight = 1.15,
+            Text = text or "",
         }, bubble)
+        self:ScrollToBottom()
+        return
     end
+
+    local avatar = create("Frame", {
+        Size = UDim2.fromOffset(20, 20),
+        Position = UDim2.fromOffset(0, 2),
+        BackgroundColor3 = Theme.accentSoft,
+        BorderSizePixel = 0,
+    }, row)
+    withCorner(avatar, 10)
+    withStroke(avatar, Theme.accent, 1, 0.55)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 9,
+        TextColor3 = Theme.accent,
+        Text = "W",
+    }, avatar)
+
+    local content = create("Frame", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(30, 0),
+        Size = UDim2.new(1, -30, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+    }, row)
+    withList(content, 4)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 14),
+        Font = Theme.fontMedium,
+        TextSize = 10,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "WrenchAi",
+    }, content)
 
     for _, part in ipairs(splitFences(text or "")) do
         if part.code then
-            local codeFrame = create("Frame", {
+            local block = create("Frame", {
                 BackgroundColor3 = Theme.code,
                 BorderSizePixel = 0,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
-            }, bubble)
-            withCorner(codeFrame, 6)
-            withPadding(codeFrame, 8, 10, 8, 10)
+            }, content)
+            withCorner(block, 12)
+            withStroke(block, Theme.lineSoft, 1, 0.4)
+            withPadding(block, 9, 11, 10, 11)
+            create("UIListLayout", {
+                Padding = UDim.new(0, 4),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+            }, block)
+            create("TextLabel", {
+                BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, 10),
+                Font = Theme.fontMedium,
+                TextSize = 8,
+                TextColor3 = Theme.faint,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Text = "CODE",
+            }, block)
             create("TextLabel", {
                 BackgroundTransparency = 1,
                 Size = UDim2.new(1, 0, 0, 0),
                 AutomaticSize = Enum.AutomaticSize.Y,
                 Font = Theme.fontCode,
-                TextSize = 12,
+                TextSize = 11,
                 TextColor3 = Theme.text,
                 TextWrapped = true,
                 TextXAlignment = Enum.TextXAlignment.Left,
                 TextYAlignment = Enum.TextYAlignment.Top,
+                LineHeight = 1.1,
                 Text = (part.text ~= "" and part.text or " "),
-            }, codeFrame)
+            }, block)
         elseif Util.Trim(part.text) ~= "" then
             create("TextLabel", {
                 BackgroundTransparency = 1,
@@ -785,22 +1488,29 @@ function UI:AddMessage(role, text)
                 TextWrapped = true,
                 TextXAlignment = Enum.TextXAlignment.Left,
                 TextYAlignment = Enum.TextYAlignment.Top,
+                LineHeight = 1.15,
                 Text = part.text,
-            }, bubble)
+            }, content)
         end
     end
     self:ScrollToBottom()
 end
 
 function UI:AddSystem(text)
-    local row = self:NewRow()
+    self.order += 1
+    local row = create("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = self.order,
+    }, self.scroll)
     create("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, -16, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.font,
-        TextSize = 10,
-        TextColor3 = Theme.muted,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Center,
         Text = text,
@@ -811,18 +1521,27 @@ end
 function UI:AddError(text)
     local row = self:NewRow()
     local frame = create("Frame", {
-        BackgroundColor3 = Theme.err,
-        BackgroundTransparency = 0.88,
+        BackgroundColor3 = Theme.errFill,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, -6, 0, 0),
+        Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
     }, row)
-    withCorner(frame, 8)
-    withStroke(frame, Theme.err, 1, 0.4)
-    withPadding(frame, 8, 10, 8, 10)
+    withCorner(frame, 12)
+    withStroke(frame, Theme.err, 1, 0.55)
+    withPadding(frame, 10, 12, 10, 12)
+
+    local dot = create("Frame", {
+        Size = UDim2.fromOffset(6, 6),
+        Position = UDim2.fromOffset(0, 5),
+        BackgroundColor3 = Theme.err,
+        BorderSizePixel = 0,
+    }, frame)
+    withCorner(dot, 3)
+
     create("TextLabel", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 0),
+        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -14, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.fontMedium,
         TextSize = 11,
@@ -836,40 +1555,68 @@ function UI:AddError(text)
 end
 
 function UI:AddToolCard(name, argsText)
+    self:HideHero()
     self.order += 1
     local card = create("Frame", {
-        BackgroundColor3 = Theme.panelAlt,
-        BackgroundTransparency = 0.1,
+        BackgroundColor3 = Theme.surface,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, -6, 0, 32),
+        Size = UDim2.new(1, 0, 0, 34),
         LayoutOrder = self.order,
         ClipsDescendants = true,
     }, self.scroll)
-    withCorner(card, 8)
-    withStroke(card, Theme.border, 1, 0.3)
+    withCorner(card, 12)
+    withStroke(card, Theme.lineSoft, 1, 0.35)
 
     local header = create("TextButton", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 32),
+        Size = UDim2.new(1, 0, 0, 34),
         Text = "",
         AutoButtonColor = false,
     }, card)
+
+    local dot = create("Frame", {
+        Size = UDim2.fromOffset(6, 6),
+        Position = UDim2.fromOffset(12, 14),
+        BackgroundColor3 = Theme.warn,
+        BorderSizePixel = 0,
+    }, header)
+    withCorner(dot, 3)
+
     local title = create("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 10, 0, 0),
-        Size = UDim2.new(1, -20, 1, 0),
+        Position = UDim2.fromOffset(26, 0),
+        Size = UDim2.new(1, -110, 1, 0),
         Font = Theme.fontCode,
         TextSize = 11,
         TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
-        Text = "[..] " .. name .. " - running",
+        Text = name,
     }, header)
+
+    local statusLabel = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(1, -76, 0, 0),
+        Size = UDim2.fromOffset(56, 34),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Text = "running",
+    }, header)
+
+    local chevron = create("Frame", {
+        Size = UDim2.fromOffset(10, 10),
+        Position = UDim2.new(1, -14, 0, 17),
+        BackgroundTransparency = 1,
+    }, header)
+    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, -1.5), 45, Theme.faint)
+    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, 1.5), -45, Theme.faint)
 
     local bodyHolder = create("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 10, 0, 32),
-        Size = UDim2.new(1, -20, 0, 0),
+        Position = UDim2.fromOffset(12, 38),
+        Size = UDim2.new(1, -24, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Visible = false,
     }, card)
@@ -878,8 +1625,8 @@ function UI:AddToolCard(name, argsText)
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.fontCode,
-        TextSize = 10,
-        TextColor3 = Theme.muted,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
@@ -893,33 +1640,32 @@ function UI:AddToolCard(name, argsText)
         if value then
             task.defer(function()
                 task.wait()
-                card.Size = UDim2.new(1, -6, 0, 34 + bodyHolder.AbsoluteSize.Y + 8)
+                if self.destroyed then
+                    return
+                end
+                tween(card, {
+                    Size = UDim2.new(1, 0, 0, 46 + bodyHolder.AbsoluteSize.Y),
+                }, 0.18, Enum.EasingStyle.Quint)
+                self:ScrollToBottom()
             end)
         else
-            card.Size = UDim2.new(1, -6, 0, 32)
+            tween(card, { Size = UDim2.new(1, 0, 0, 34) }, 0.16, Enum.EasingStyle.Quint)
         end
     end
     header.MouseButton1Click:Connect(function()
         setExpanded(not expanded)
-        self:ScrollToBottom()
     end)
 
     local cardApi = {}
     local ui = self
     function cardApi:Finish(ok, resultText, seconds)
-        local status = ok and "ok" or "error"
-        title.Text = "["
-            .. (ok and "OK" or "ERR")
-            .. "] "
-            .. name
-            .. " - "
-            .. status
-            .. " - "
-            .. Util.FormatSeconds(seconds or 0)
-        title.TextColor3 = ok and Theme.ok or Theme.err
-        body.Text = "args:\n"
+        dot.BackgroundColor3 = ok and Theme.ok or Theme.err
+        statusLabel.Text = (ok and "done " or "failed ") .. Util.FormatSeconds(seconds or 0)
+        statusLabel.TextColor3 = ok and Theme.faint or Theme.err
+        title.TextColor3 = ok and Theme.muted or Theme.text
+        body.Text = "args\n"
             .. Util.Truncate(argsText or "{}", 800)
-            .. "\n\nresult:\n"
+            .. "\n\nresult\n"
             .. Util.Truncate(resultText or "", 3000)
         if not ok then
             setExpanded(true)
@@ -939,71 +1685,67 @@ function UI:AskApproval(spec, isCancelled)
     self.pendingApproval = state
 
     if not self.root.Visible then
-        self.root.Visible = true
-        self.fab.Visible = false
+        self:Show()
     end
 
     local row = self:NewRow()
     local card = create("Frame", {
-        BackgroundColor3 = Theme.panel,
-        BackgroundTransparency = 0,
+        BackgroundColor3 = Theme.surface,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, -6, 0, 0),
+        Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
     }, row)
-    withCorner(card, 10)
-    withStroke(card, Theme.warn, 1, 0.4)
-    withPadding(card, 10, 12, 10, 12)
-    create("UIListLayout", {
-        Padding = UDim.new(0, 6),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, card)
+    withCorner(card, 14)
+    withStroke(card, Theme.warn, 1, 0.5)
+    withPadding(card, 12, 14, 12, 14)
+    withList(card, 8)
 
-    local title = create("TextLabel", {
+    create("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 14),
         Font = Theme.fontBold,
         TextSize = 12,
         TextColor3 = Theme.warn,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "Permission - " .. tostring(spec.title or "Run code"),
+        Text = "Permission required",
     }, card)
 
-    create("TextLabel", {
+    local title = create("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.font,
         TextSize = 11,
-        TextColor3 = Theme.text,
+        TextColor3 = Theme.muted,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
-        Text = tostring(spec.description or ""),
+        Text = tostring(spec.description or spec.title or "Run this code?"),
     }, card)
 
     local codeScroll = create("ScrollingFrame", {
         BackgroundColor3 = Theme.code,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, 140),
-        ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.border,
+        Size = UDim2.new(1, 0, 0, 132),
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.line,
         ScrollingDirection = Enum.ScrollingDirection.Y,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
     }, card)
-    withCorner(codeScroll, 6)
-    withPadding(codeScroll, 6, 8, 6, 8)
+    withCorner(codeScroll, 10)
+    withPadding(codeScroll, 8, 10, 8, 10)
     create("TextLabel", {
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.fontCode,
-        TextSize = 11,
+        TextSize = 10,
         TextColor3 = Theme.text,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
+        LineHeight = 1.1,
         Text = tostring(spec.code or ""),
     }, codeScroll)
 
@@ -1011,25 +1753,21 @@ function UI:AskApproval(spec, isCancelled)
         BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 34),
     }, card)
-    create("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 6),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, buttons)
+    withList(buttons, 6, true)
 
-    local function decisionButton(text, color, order, callback)
+    local function decisionButton(text, color, textColor, width, order, callback)
         local button = create("TextButton", {
-            Size = UDim2.new(0.32, -4, 1, 0),
+            Size = UDim2.new(width, -4, 1, 0),
             BackgroundColor3 = color,
             BorderSizePixel = 0,
             Text = text,
             Font = Theme.fontBold,
             TextSize = 11,
-            TextColor3 = Theme.text,
+            TextColor3 = textColor,
             AutoButtonColor = false,
             LayoutOrder = order,
         }, buttons)
-        withCorner(button, 8)
+        withCorner(button, 11)
         button.MouseButton1Click:Connect(function()
             if not state.done then
                 callback()
@@ -1045,25 +1783,26 @@ function UI:AskApproval(spec, isCancelled)
         state.done = true
         state.allow = allow
         state.always = always
-        title.Text = allow and "Approved - Run code" or "Denied - Run code"
+        title.Text = allow and "Approved. Running the code now." or "Denied. Nothing was executed."
         title.TextColor3 = allow and Theme.ok or Theme.err
         for _, child in ipairs(buttons:GetChildren()) do
             if child:IsA("TextButton") then
                 child.Active = false
-                child.TextTransparency = 0.5
+                child.TextTransparency = 0.45
+                child.BackgroundTransparency = 0.45
             end
         end
         self:SetStatus(allow and "Approved" or "Denied", allow and Theme.ok or Theme.err)
         self:ScrollToBottom()
     end
 
-    decisionButton("Run", Theme.accent, 1, function()
+    decisionButton("Run", Theme.accent, Theme.white, 0.32, 1, function()
         finish(true, false)
     end)
-    decisionButton("Always", Theme.panelAlt, 2, function()
+    decisionButton("Always allow", Theme.surfaceHi, Theme.text, 0.4, 2, function()
         finish(true, true)
     end)
-    decisionButton("Deny", Color3.fromRGB(92, 34, 40), 3, function()
+    decisionButton("Deny", Theme.errFill, Theme.err, 0.28, 3, function()
         finish(false, false)
     end)
 
@@ -1079,6 +1818,26 @@ function UI:AskApproval(spec, isCancelled)
 
     self.pendingApproval = nil
     return state.allow, state.always
+end
+
+function UI:Destroy()
+    if self.destroyed then
+        return
+    end
+    self.destroyed = true
+    for _, connection in ipairs(self.connections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    self.connections = {}
+    if self.gui then
+        pcall(function()
+            self.gui:Destroy()
+        end)
+        self.gui = nil
+    end
+    self.root = nil
 end
 
 return UI

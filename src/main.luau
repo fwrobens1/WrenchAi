@@ -1,3 +1,4 @@
+local Players = game:GetService("Players")
 local Compat = require("./compat")
 local Config = require("./config")
 local UI = require("./ui/window")
@@ -7,19 +8,72 @@ local Util = require("./util")
 
 local environment = Compat.Environment
 
-local previous = environment.WrenchAi
-if type(previous) == "table" then
-    if previous.loop then
-        pcall(function()
-            previous.loop:Cancel()
-        end)
+local function guiParents()
+    local parents = {}
+    local function add(parent)
+        if parent then
+            table.insert(parents, parent)
+        end
     end
-    if previous.ui and previous.ui.gui then
-        pcall(function()
-            previous.ui.gui:Destroy()
+    local gethui = Compat.Lookup("gethui")
+    if type(gethui) == "function" then
+        local ok, parent = pcall(gethui)
+        if ok then
+            add(parent)
+        end
+    end
+    add(Players.LocalPlayer:FindFirstChild("PlayerGui"))
+    local ok, coreGui = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if ok then
+        add(coreGui)
+    end
+    return parents
+end
+
+local function destroyLeftoverGuis()
+    for _, parent in ipairs(guiParents()) do
+        local ok, children = pcall(function()
+            return parent:GetChildren()
         end)
+        if ok and type(children) == "table" then
+            for _, child in ipairs(children) do
+                local nameOk, name = pcall(function()
+                    return child.Name
+                end)
+                if nameOk and name == "WrenchAi" then
+                    pcall(function()
+                        child:Destroy()
+                    end)
+                end
+            end
+        end
     end
 end
+
+local function unloadPrevious()
+    local previous = environment.WrenchAi
+    if type(previous) == "table" then
+        if type(previous.unload) == "function" then
+            pcall(previous.unload)
+        end
+        if previous.loop and type(previous.loop.Cancel) == "function" then
+            pcall(function()
+                previous.loop:Cancel()
+            end)
+        end
+        if previous.ui and type(previous.ui.Destroy) == "function" then
+            pcall(function()
+                previous.ui:Destroy()
+            end)
+        end
+    end
+    environment.WrenchAi = nil
+    destroyLeftoverGuis()
+end
+
+unloadPrevious()
 
 local config = Config.Load()
 local ui = UI.new({ config = config, compat = Compat, callbacks = {} })
@@ -110,6 +164,26 @@ local api = {
         ui:Toggle()
     end,
 }
+
+api.unload = function()
+    pcall(function()
+        loop:Cancel()
+    end)
+    if ui.Destroy then
+        pcall(function()
+            ui:Destroy()
+        end)
+    end
+    if environment.WrenchAi == api then
+        environment.WrenchAi = nil
+    end
+    if type(_G) == "table" and _G ~= environment and _G.WrenchAi == api then
+        pcall(function()
+            _G.WrenchAi = nil
+        end)
+    end
+    destroyLeftoverGuis()
+end
 
 environment.WrenchAi = api
 if type(_G) == "table" and _G ~= environment then

@@ -48,6 +48,14 @@ end
 function UDim2.fromOffset(x, y)
     return UDim2.new(0, x or 0, 0, y or 0)
 end
+function UDim2.fromScale(x, y)
+    return UDim2.new(x or 0, 0, y or 0, 0)
+end
+
+local ColorSequence = {}
+function ColorSequence.new(first, second)
+    return { first, second }
+end
 
 local enumCache = {}
 local Enum = setmetatable({}, {
@@ -501,6 +509,12 @@ local player = {
     DisplayName = "Tester",
     UserId = 12345,
     Character = nil,
+    FindFirstChild = function(_, name)
+        if name == "PlayerGui" then
+            return playerGui
+        end
+        return nil
+    end,
 }
 
 local players = {
@@ -533,6 +547,15 @@ local services = {
     Players = players,
     CoreGui = coreGui,
     HttpService = HttpService,
+    TweenService = {
+        Create = function(_, _, _, _)
+            return {
+                Play = function() end,
+                Cancel = function() end,
+                Pause = function() end,
+            }
+        end,
+    },
     LogService = {
         GetLogHistory = function()
             return {}
@@ -633,11 +656,17 @@ game = gameMock
 workspace = workspaceMock
 Instance = Instance
 Color3 = Color3
+ColorSequence = ColorSequence
 UDim = UDim
 UDim2 = UDim2
 Vector2 = { new = newVector2 }
 Vector3 = { new = newVector3 }
 Enum = Enum
+TweenInfo = {
+    new = function(...)
+        return { ... }
+    end,
+}
 
 task = {
     wait = function()

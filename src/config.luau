@@ -62,6 +62,11 @@ function Config.Load()
         end
     end
 
+    local injectedKey = Compat.Environment.WrenchAiApiKey
+    if type(injectedKey) == "string" and Util.Trim(injectedKey) ~= "" then
+        config.apiKey = Util.Trim(injectedKey)
+    end
+
     return config
 end
 
