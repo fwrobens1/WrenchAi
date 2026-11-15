@@ -11,6 +11,7 @@ local MAX_CONTEXT_CHARS = 60000
 
 local function messageChars(message)
     local size = #tostring(message.content or "")
+    size += #tostring(message.reasoning_content or "")
     if type(message.tool_calls) == "table" then
         size += #message.tool_calls * 240
     end
@@ -145,6 +146,20 @@ local function looksLikeToolRejection(err)
     return raw:find("tool", 1, true) ~= nil
 end
 
+local function looksLikeReasoningError(err)
+    local raw = string.lower(tostring(err.raw or err.message or ""))
+    return raw:find("reasoning", 1, true) ~= nil
+end
+
+local function keepLastUserTurn(messages)
+    for index = #messages, 1, -1 do
+        if isTurnStart(messages[index]) then
+            return { messages[index] }
+        end
+    end
+    return {}
+end
+
 local function extractProtocolCall(content, tools)
     if type(content) ~= "string" then
         return nil
@@ -182,6 +197,7 @@ function Loop.new(deps)
     self.running = false
     self.cancelled = false
     self.toolsSupported = true
+    self.recoveredHistory = false
     return self
 end
 
@@ -202,6 +218,7 @@ function Loop:Reset()
     self.messages = {}
     self.cancelled = false
     self.continueCount = 0
+    self.recoveredHistory = false
 end
 
 function Loop:BuildSystem()
@@ -269,6 +286,15 @@ function Loop:Execute()
                 self.ui:AddSystem("This endpoint rejected native tool calling; switched to the JSON tool protocol.")
                 continue
             end
+            -- Beam requires reasoning_content to be echoed on every earlier
+            -- assistant message. If history from an older session lacks it,
+            -- restart this turn with a fresh context instead of failing.
+            if err.kind == "http" and looksLikeReasoningError(err) and not self.recoveredHistory then
+                self.recoveredHistory = true
+                self.messages = keepLastUserTurn(self.messages)
+                self.ui:AddSystem("The model needed reasoning history that isn't available; restarted this turn with a fresh context.")
+                continue
+            end
             self.ui:AddError(err.message or "The API request failed.")
             if err.kind == "auth" then
                 self.ui:OpenSettings()
@@ -289,6 +315,9 @@ function Loop:Execute()
         local content = normalizeContent(message.content)
         local reasoning = normalizeContent(message.reasoning_content)
         local calls = sanitizeToolCalls(message.tool_calls)
+        -- Beam demands the reasoning of every earlier assistant message be
+        -- sent back with it; cap it so history does not blow the budget.
+        local storedReasoning = Util.Truncate(reasoning or "", 4000)
 
         -- Reasoning models think in a separate field; surface it as a
         -- collapsible trace so long invisible pauses become visible progress.
@@ -300,6 +329,7 @@ function Loop:Execute()
             table.insert(self.messages, {
                 role = "assistant",
                 content = content or "",
+                reasoning_content = storedReasoning,
                 tool_calls = calls,
             })
             if content and Util.Trim(content) ~= "" then
@@ -343,7 +373,11 @@ function Loop:Execute()
             local text = content or ""
             local protocolCall = extractProtocolCall(text, self.tools)
             if protocolCall then
-                table.insert(self.messages, { role = "assistant", content = text })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = text,
+                    reasoning_content = storedReasoning,
+                })
                 local argsJson = Serialize.Encode(protocolCall.arguments, 600)
                 local _, resultJson = self:RunTool(protocolCall.name, protocolCall.arguments, argsJson)
                 table.insert(self.messages, {
@@ -358,7 +392,11 @@ function Loop:Execute()
             elseif Util.Trim(text) == "" and Util.Trim(reasoning or "") ~= "" then
                 -- Beam sometimes stops right after its internal reasoning
                 -- without emitting content. Ask it to finish the thought.
-                table.insert(self.messages, { role = "assistant", content = "" })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = "",
+                    reasoning_content = storedReasoning,
+                })
                 self.continueCount = (self.continueCount or 0) + 1
                 if self.continueCount > 3 then
                     self.ui:AddError("The model kept thinking without answering. Try sending the message again.")
@@ -378,7 +416,11 @@ function Loop:Execute()
                     text = "(The model returned no text.)"
                 end
                 self.ui:AddMessage("assistant", text)
-                table.insert(self.messages, { role = "assistant", content = text })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = text,
+                    reasoning_content = storedReasoning,
+                })
                 finished = true
                 break
             end
@@ -404,6 +446,7 @@ function Loop:Send(text)
     self.running = true
     self.cancelled = false
     self.continueCount = 0
+    self.recoveredHistory = false
     table.insert(self.messages, { role = "user", content = clean })
     self.ui:SetRunning(true)
     self.ui:SetStatus("Thinking...")

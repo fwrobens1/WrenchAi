@@ -25,6 +25,7 @@ local MAX_CONTEXT_CHARS = 60000
 
 local function messageChars(message)
     local size = #tostring(message.content or "")
+    size += #tostring(message.reasoning_content or "")
     if type(message.tool_calls) == "table" then
         size += #message.tool_calls * 240
     end
@@ -159,6 +160,20 @@ local function looksLikeToolRejection(err)
     return raw:find("tool", 1, true) ~= nil
 end
 
+local function looksLikeReasoningError(err)
+    local raw = string.lower(tostring(err.raw or err.message or ""))
+    return raw:find("reasoning", 1, true) ~= nil
+end
+
+local function keepLastUserTurn(messages)
+    for index = #messages, 1, -1 do
+        if isTurnStart(messages[index]) then
+            return { messages[index] }
+        end
+    end
+    return {}
+end
+
 local function extractProtocolCall(content, tools)
     if type(content) ~= "string" then
         return nil
@@ -196,6 +211,7 @@ function Loop.new(deps)
     self.running = false
     self.cancelled = false
     self.toolsSupported = true
+    self.recoveredHistory = false
     return self
 end
 
@@ -216,6 +232,7 @@ function Loop:Reset()
     self.messages = {}
     self.cancelled = false
     self.continueCount = 0
+    self.recoveredHistory = false
 end
 
 function Loop:BuildSystem()
@@ -283,6 +300,15 @@ function Loop:Execute()
                 self.ui:AddSystem("This endpoint rejected native tool calling; switched to the JSON tool protocol.")
                 continue
             end
+            -- Beam requires reasoning_content to be echoed on every earlier
+            -- assistant message. If history from an older session lacks it,
+            -- restart this turn with a fresh context instead of failing.
+            if err.kind == "http" and looksLikeReasoningError(err) and not self.recoveredHistory then
+                self.recoveredHistory = true
+                self.messages = keepLastUserTurn(self.messages)
+                self.ui:AddSystem("The model needed reasoning history that isn't available; restarted this turn with a fresh context.")
+                continue
+            end
             self.ui:AddError(err.message or "The API request failed.")
             if err.kind == "auth" then
                 self.ui:OpenSettings()
@@ -303,6 +329,9 @@ function Loop:Execute()
         local content = normalizeContent(message.content)
         local reasoning = normalizeContent(message.reasoning_content)
         local calls = sanitizeToolCalls(message.tool_calls)
+        -- Beam demands the reasoning of every earlier assistant message be
+        -- sent back with it; cap it so history does not blow the budget.
+        local storedReasoning = Util.Truncate(reasoning or "", 4000)
 
         -- Reasoning models think in a separate field; surface it as a
         -- collapsible trace so long invisible pauses become visible progress.
@@ -314,6 +343,7 @@ function Loop:Execute()
             table.insert(self.messages, {
                 role = "assistant",
                 content = content or "",
+                reasoning_content = storedReasoning,
                 tool_calls = calls,
             })
             if content and Util.Trim(content) ~= "" then
@@ -357,7 +387,11 @@ function Loop:Execute()
             local text = content or ""
             local protocolCall = extractProtocolCall(text, self.tools)
             if protocolCall then
-                table.insert(self.messages, { role = "assistant", content = text })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = text,
+                    reasoning_content = storedReasoning,
+                })
                 local argsJson = Serialize.Encode(protocolCall.arguments, 600)
                 local _, resultJson = self:RunTool(protocolCall.name, protocolCall.arguments, argsJson)
                 table.insert(self.messages, {
@@ -372,7 +406,11 @@ function Loop:Execute()
             elseif Util.Trim(text) == "" and Util.Trim(reasoning or "") ~= "" then
                 -- Beam sometimes stops right after its internal reasoning
                 -- without emitting content. Ask it to finish the thought.
-                table.insert(self.messages, { role = "assistant", content = "" })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = "",
+                    reasoning_content = storedReasoning,
+                })
                 self.continueCount = (self.continueCount or 0) + 1
                 if self.continueCount > 3 then
                     self.ui:AddError("The model kept thinking without answering. Try sending the message again.")
@@ -392,7 +430,11 @@ function Loop:Execute()
                     text = "(The model returned no text.)"
                 end
                 self.ui:AddMessage("assistant", text)
-                table.insert(self.messages, { role = "assistant", content = text })
+                table.insert(self.messages, {
+                    role = "assistant",
+                    content = text,
+                    reasoning_content = storedReasoning,
+                })
                 finished = true
                 break
             end
@@ -418,6 +460,7 @@ function Loop:Send(text)
     self.running = true
     self.cancelled = false
     self.continueCount = 0
+    self.recoveredHistory = false
     table.insert(self.messages, { role = "user", content = clean })
     self.ui:SetRunning(true)
     self.ui:SetStatus("Thinking...")
@@ -3356,6 +3399,13 @@ function ICONS.arrowUp(parent, color)
     bar(parent, 7, 1.8, UDim2.new(0.5, 2.2, 0.5, -4), -40, color)
 end
 
+function ICONS.sparkle(parent, color)
+    bar(parent, 11, 1.6, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.6, 11, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 8, 1.4, UDim2.fromScale(0.5, 0.5), 45, color)
+    bar(parent, 8, 1.4, UDim2.fromScale(0.5, 0.5), -45, color)
+end
+
 local function findGuiParent(compat)
     local gethui = compat.Lookup("gethui")
     if type(gethui) == "function" then
@@ -3431,6 +3481,7 @@ function UI.new(deps)
     self.pendingApproval = nil
     self.connections = {}
     self.destroyed = false
+    self.thinkingCards = {}
     self.baseScale = 1
     self:Build()
     return self
@@ -4512,6 +4563,9 @@ function UI:SetRunning(running)
                 Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
         end
     end
+    if not running then
+        self:SettleThinking()
+    end
 end
 
 function UI:Show()
@@ -4581,6 +4635,7 @@ function UI:ClearMessages()
         end
     end
     self.order = 0
+    self.thinkingCards = {}
     if self.hero then
         self.hero.Visible = true
         self.hero.Size = UDim2.new(1, 0, 0, HERO_HEIGHT)
@@ -4828,44 +4883,56 @@ function UI:AddThinking(text)
     self:HideHero()
     self.order += 1
     local card = create("Frame", {
-        BackgroundColor3 = Theme.accentSoft,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, 30),
+        Size = UDim2.new(1, 0, 0, 26),
         LayoutOrder = self.order,
         ClipsDescendants = true,
     }, self.scroll)
-    withCorner(card, 10)
-    withStroke(card, Theme.accent, 1, 0.5)
 
+    -- Flat trace like beautifului.dev's thinking component: sparkle icon,
+    -- shimmering "Thinking" label and an expandable prose body with a rule
+    -- line. No bubble background, so it can't be mistaken for a message.
     local header = create("TextButton", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 30),
+        Size = UDim2.new(1, 0, 0, 26),
         Text = "",
         AutoButtonColor = false,
     }, card)
 
-    local dot = create("Frame", {
-        Size = UDim2.fromOffset(6, 6),
-        Position = UDim2.fromOffset(12, 12),
-        BackgroundColor3 = Theme.accent,
-        BorderSizePixel = 0,
-    }, header)
-    withCorner(dot, 3)
-
-    create("TextLabel", {
+    local hover = create("Frame", {
+        BackgroundColor3 = Theme.surfaceHi,
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(25, 0),
-        Size = UDim2.new(1, -110, 1, 0),
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.new(1, 0, 1, 0),
+    }, header)
+    withCorner(hover, 6)
+
+    local sparkle = create("Frame", {
+        Size = UDim2.fromOffset(16, 16),
+        Position = UDim2.fromOffset(2, 5),
+        BackgroundTransparency = 1,
+    }, header)
+    ICONS.sparkle(sparkle, Theme.muted)
+
+    local label = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(24, 0),
+        Size = UDim2.new(1, -66, 1, 0),
         Font = Theme.fontMedium,
-        TextSize = 10,
+        TextSize = 12,
         TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = "Thinking",
     }, header)
 
+    local shimmer = tween(label, { TextTransparency = 0.55 }, 0.9,
+        Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+
     local chevron = create("Frame", {
-        Size = UDim2.fromOffset(10, 10),
-        Position = UDim2.new(1, -14, 0, 15),
+        Size = UDim2.fromOffset(12, 12),
+        Position = UDim2.new(1, -2, 0, 7),
         BackgroundTransparency = 1,
     }, header)
     bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, -1.5), 45, Theme.faint)
@@ -4873,46 +4940,85 @@ function UI:AddThinking(text)
 
     local bodyHolder = create("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 34),
-        Size = UDim2.new(1, -24, 0, 0),
+        Position = UDim2.fromOffset(0, 28),
+        Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Visible = false,
     }, card)
-    create("TextLabel", {
+    local rule = create("Frame", {
+        BackgroundColor3 = Theme.line,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(7, 0),
+        Size = UDim2.new(0, 1, 0, 0),
+    }, bodyHolder)
+    local body = create("TextLabel", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 0),
+        Position = UDim2.fromOffset(16, 0),
+        Size = UDim2.new(1, -16, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         Font = Theme.font,
-        TextSize = 10,
-        TextColor3 = Theme.faint,
+        TextSize = 12,
+        TextColor3 = Theme.muted,
         TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
-        LineHeight = 1.25,
+        LineHeight = 1.35,
         Text = Util.Truncate(text or "", 1200),
     }, bodyHolder)
 
     local expanded = false
-    header.MouseButton1Click:Connect(function()
-        expanded = not expanded
-        bodyHolder.Visible = expanded
-        if expanded then
+    local function setExpanded(value)
+        expanded = value
+        bodyHolder.Visible = value
+        tween(chevron, { Rotation = value and 180 or 0 }, 0.22, Enum.EasingStyle.Quint)
+        if value then
             task.defer(function()
                 task.wait()
                 if self.destroyed then
                     return
                 end
+                local bodyHeight = body.AbsoluteSize.Y
+                rule.Size = UDim2.new(0, 1, 0, math.max(0, bodyHeight - 2))
                 tween(card, {
-                    Size = UDim2.new(1, 0, 0, 38 + bodyHolder.AbsoluteSize.Y),
-                }, 0.18, Enum.EasingStyle.Quint)
+                    Size = UDim2.new(1, 0, 0, 30 + bodyHeight),
+                }, 0.2, Enum.EasingStyle.Quint)
                 self:ScrollToBottom()
             end)
         else
-            tween(card, { Size = UDim2.new(1, 0, 0, 30) }, 0.16, Enum.EasingStyle.Quint)
+            tween(card, { Size = UDim2.new(1, 0, 0, 26) }, 0.16, Enum.EasingStyle.Quint)
         end
+    end
+    header.MouseButton1Click:Connect(function()
+        setExpanded(not expanded)
+    end)
+    header.MouseEnter:Connect(function()
+        tween(hover, { BackgroundTransparency = 0.55 }, 0.12)
+    end)
+    header.MouseLeave:Connect(function()
+        tween(hover, { BackgroundTransparency = 1 }, 0.12)
     end)
 
+    table.insert(self.thinkingCards, {
+        settle = function()
+            if shimmer then
+                pcall(function()
+                    shimmer:Cancel()
+                end)
+            end
+            label.Text = "Thought"
+            label.TextTransparency = 0.3
+            label.TextColor3 = Theme.faint
+        end,
+    })
+
     self:ScrollToBottom()
+end
+
+function UI:SettleThinking()
+    for _, card in ipairs(self.thinkingCards or {}) do
+        pcall(card.settle)
+    end
+    self.thinkingCards = {}
 end
 
 function UI:AddToolCard(name, argsText)

@@ -26,19 +26,26 @@ check(#api.tools:PromptCatalog() > 100, "prompt catalog rendered")
 
 local toolCallResponse = table.concat({
     '{"choices":[{"message":{"role":"assistant","content":null,',
+    '"reasoning_content":"step one thinking",',
     '"tool_calls":[{"id":"call_1","type":"function","function":',
     '{"name":"run_luau","arguments":"{\\"code\\":\\"return 40 + 2\\",\\"description\\":\\"math\\"}"}}]}}]}',
 })
 G.pushResponse(toolCallResponse)
-G.pushResponse('{"choices":[{"message":{"role":"assistant","content":"The answer is 42."}}]}')
+G.pushResponse(
+    '{"choices":[{"message":{"role":"assistant","content":"The answer is 42.","reasoning_content":"final thinking"}}]}'
+)
 
 api.loop:Send("compute 40 + 2")
 check(#api.loop.messages == 4, "4 messages after one tool round, got " .. tostring(#api.loop.messages))
 check(api.loop.messages[1].role == "user", "first message is the user turn")
 check(api.loop.messages[2].role == "assistant" and api.loop.messages[2].tool_calls ~= nil, "assistant tool_calls recorded")
+check(api.loop.messages[2].reasoning_content == "step one thinking", "tool-call reasoning echoed for Beam")
 check(api.loop.messages[3].role == "tool", "tool result recorded")
 check(api.loop.messages[3].content:find("42", 1, true) ~= nil, "tool result carries the returned value")
 check(api.loop.messages[4].content == "The answer is 42.", "final assistant text recorded")
+check(api.loop.messages[4].reasoning_content == "final thinking", "final reasoning echoed for Beam")
+local requestProbe = api.loop:BuildRequest()
+check(requestProbe[#requestProbe].reasoning_content == "final thinking", "reasoning_content reaches the request")
 check(api.loop.running == false, "loop is idle after the turn")
 
 api.loop.toolsSupported = false
