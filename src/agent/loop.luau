@@ -201,6 +201,7 @@ end
 function Loop:Reset()
     self.messages = {}
     self.cancelled = false
+    self.continueCount = 0
 end
 
 function Loop:BuildSystem()
@@ -286,7 +287,14 @@ function Loop:Execute()
 
         local message = choice.message or {}
         local content = normalizeContent(message.content)
+        local reasoning = normalizeContent(message.reasoning_content)
         local calls = sanitizeToolCalls(message.tool_calls)
+
+        -- Reasoning models think in a separate field; surface it as a
+        -- collapsible trace so long invisible pauses become visible progress.
+        if Util.Trim(reasoning or "") ~= "" then
+            self.ui:AddThinking(reasoning)
+        end
 
         if #calls > 0 then
             table.insert(self.messages, {
@@ -347,6 +355,24 @@ function Loop:Execute()
                         .. "\n\nContinue: call another tool or answer the user.",
                 })
                 step += 1
+            elseif Util.Trim(text) == "" and Util.Trim(reasoning or "") ~= "" then
+                -- Beam sometimes stops right after its internal reasoning
+                -- without emitting content. Ask it to finish the thought.
+                table.insert(self.messages, { role = "assistant", content = "" })
+                self.continueCount = (self.continueCount or 0) + 1
+                if self.continueCount > 3 then
+                    self.ui:AddError("The model kept thinking without answering. Try sending the message again.")
+                    finished = true
+                    break
+                end
+                local nudge = "Continue now. Output ONLY your next step, with no explanations:"
+                if self.toolsSupported then
+                    nudge = nudge .. " call one of the provided tools, or give your final answer as plain text."
+                else
+                    nudge = nudge .. ' plain text, or exactly one JSON object {"tool":"name","args":{...}}.'
+                end
+                table.insert(self.messages, { role = "user", content = nudge })
+                step += 1
             else
                 if Util.Trim(text) == "" then
                     text = "(The model returned no text.)"
@@ -377,6 +403,7 @@ function Loop:Send(text)
 
     self.running = true
     self.cancelled = false
+    self.continueCount = 0
     table.insert(self.messages, { role = "user", content = clean })
     self.ui:SetRunning(true)
     self.ui:SetStatus("Thinking...")

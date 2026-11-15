@@ -14,7 +14,7 @@ local WINDOW_MARGIN = 12
 local HEADER_HEIGHT = 56
 local STATUS_HEIGHT = 20
 local CHAT_TOP = 78
-local COMPOSER_HEIGHT = 60
+local COMPOSER_HEIGHT = 74
 local COMPOSER_BOTTOM = 16
 local CHAT_BOTTOM = COMPOSER_BOTTOM + COMPOSER_HEIGHT + 6
 local HERO_HEIGHT = 168
@@ -652,8 +652,8 @@ function UI:BuildComposer()
 
     self.input = create("TextBox", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 16, 0, 10),
-        Size = UDim2.new(1, -72, 1, -20),
+        Position = UDim2.new(0, 16, 0, 8),
+        Size = UDim2.new(1, -72, 0, 32),
         Font = Theme.font,
         TextSize = 13,
         TextColor3 = Theme.text,
@@ -669,8 +669,8 @@ function UI:BuildComposer()
 
     self.sendButton = create("TextButton", {
         Size = UDim2.fromOffset(36, 36),
-        Position = UDim2.new(1, -12, 0.5, 0),
-        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -12, 0, 7),
+        AnchorPoint = Vector2.new(1, 0),
         BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0,
         Text = "",
@@ -704,6 +704,37 @@ function UI:BuildComposer()
     self.sendButton.MouseButton1Click:Connect(function()
         self:Submit()
     end)
+
+    create("Frame", {
+        BackgroundColor3 = Theme.lineSoft,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 16, 0, 48),
+        Size = UDim2.new(1, -32, 0, 1),
+    }, frame)
+
+    self.composerModel = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0, 16, 0, 54),
+        Size = UDim2.new(1, -150, 0, 14),
+        Font = Theme.fontCode,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = Util.Truncate(tostring(self.config.model or "model"), 30),
+    }, frame)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(1, -16, 0, 54),
+        Size = UDim2.fromOffset(134, 14),
+        AnchorPoint = Vector2.new(1, 0),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Text = UserInputService.TouchEnabled and "Tap send" or "Enter to send",
+    }, frame)
 
     self.input.Focused:Connect(function()
         tween(self.composerStroke, { Color = Theme.accent, Transparency = 0.45 }, 0.16)
@@ -1211,6 +1242,9 @@ function UI:SaveSettings()
     if self.modelChip then
         self.modelChip.Text = Util.Truncate(model, 22)
     end
+    if self.composerModel then
+        self.composerModel.Text = Util.Truncate(model, 30)
+    end
     self.settingsStatus.Text = message
     self.settingsStatus.TextColor3 = ok and Theme.ok or Theme.err
 end
@@ -1409,6 +1443,7 @@ function UI:AddMessage(role, text)
         AutomaticSize = Enum.AutomaticSize.Y,
     }, row)
     withList(content, 8)
+    local copySource = text or ""
 
     for _, part in ipairs(splitFences(text or "")) do
         if part.code then
@@ -1462,6 +1497,49 @@ function UI:AddMessage(role, text)
                 Text = part.text,
             }, content)
         end
+    end
+
+    if Util.Trim(copySource) ~= "" then
+        local copyHolder = create("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 22),
+        }, content)
+        local copy = create("TextButton", {
+            Size = UDim2.fromOffset(52, 22),
+            Position = UDim2.new(1, 0, 0, 0),
+            AnchorPoint = Vector2.new(1, 0),
+            BackgroundColor3 = Theme.surface,
+            BorderSizePixel = 0,
+            Text = "Copy",
+            Font = Theme.fontMedium,
+            TextSize = 9,
+            TextColor3 = Theme.muted,
+            AutoButtonColor = false,
+        }, copyHolder)
+        withCorner(copy, 11)
+        withStroke(copy, Theme.lineSoft, 1, 0.35)
+        local clipboard = self.compat.Lookup("setclipboard") or self.compat.Lookup("writeclipboard")
+        copy.MouseEnter:Connect(function()
+            tween(copy, { BackgroundColor3 = Theme.surfaceHi }, 0.12)
+        end)
+        copy.MouseLeave:Connect(function()
+            tween(copy, { BackgroundColor3 = Theme.surface }, 0.12)
+        end)
+        copy.MouseButton1Click:Connect(function()
+            local ok = false
+            if type(clipboard) == "function" then
+                ok = pcall(clipboard, copySource)
+            end
+            copy.Text = ok and "Copied" or "No clipboard"
+            copy.TextColor3 = ok and Theme.ok or Theme.err
+            task.delay(1.5, function()
+                if self.destroyed or not copy.Parent then
+                    return
+                end
+                copy.Text = "Copy"
+                copy.TextColor3 = Theme.muted
+            end)
+        end)
     end
     self:ScrollToBottom()
 end
@@ -1521,6 +1599,97 @@ function UI:AddError(text)
         TextYAlignment = Enum.TextYAlignment.Top,
         Text = text,
     }, frame)
+    self:ScrollToBottom()
+end
+
+function UI:AddThinking(text)
+    self:HideHero()
+    self.order += 1
+    local card = create("Frame", {
+        BackgroundColor3 = Theme.accentSoft,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 30),
+        LayoutOrder = self.order,
+        ClipsDescendants = true,
+    }, self.scroll)
+    withCorner(card, 10)
+    withStroke(card, Theme.accent, 1, 0.5)
+
+    local header = create("TextButton", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 30),
+        Text = "",
+        AutoButtonColor = false,
+    }, card)
+
+    local dot = create("Frame", {
+        Size = UDim2.fromOffset(6, 6),
+        Position = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+    }, header)
+    withCorner(dot, 3)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(25, 0),
+        Size = UDim2.new(1, -110, 1, 0),
+        Font = Theme.fontMedium,
+        TextSize = 10,
+        TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Thinking",
+    }, header)
+
+    local chevron = create("Frame", {
+        Size = UDim2.fromOffset(10, 10),
+        Position = UDim2.new(1, -14, 0, 15),
+        BackgroundTransparency = 1,
+    }, header)
+    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, -1.5), 45, Theme.faint)
+    bar(chevron, 6, 1.4, UDim2.new(0.5, -1.5, 0.5, 1.5), -45, Theme.faint)
+
+    local bodyHolder = create("Frame", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 34),
+        Size = UDim2.new(1, -24, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Visible = false,
+    }, card)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Font = Theme.font,
+        TextSize = 10,
+        TextColor3 = Theme.faint,
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        LineHeight = 1.25,
+        Text = Util.Truncate(text or "", 1200),
+    }, bodyHolder)
+
+    local expanded = false
+    header.MouseButton1Click:Connect(function()
+        expanded = not expanded
+        bodyHolder.Visible = expanded
+        if expanded then
+            task.defer(function()
+                task.wait()
+                if self.destroyed then
+                    return
+                end
+                tween(card, {
+                    Size = UDim2.new(1, 0, 0, 38 + bodyHolder.AbsoluteSize.Y),
+                }, 0.18, Enum.EasingStyle.Quint)
+                self:ScrollToBottom()
+            end)
+        else
+            tween(card, { Size = UDim2.new(1, 0, 0, 30) }, 0.16, Enum.EasingStyle.Quint)
+        end
+    end)
+
     self:ScrollToBottom()
 end
 
