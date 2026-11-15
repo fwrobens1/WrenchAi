@@ -104,9 +104,10 @@ script twice never stacks two windows.
 A single dark-charcoal panel designed to sit on top of any game without looking like a
 default Roblox GUI.
 
-- **Auto-scale.** The panel is authored at 420×700 and wrapped in a `UIScale` that fits the
-  current viewport (clamped 0.55–1.15). It recomputes on viewport changes, so phones,
-  tablets, and desktop windows all get a correctly sized window.
+- **Auto-scale.** The panel is authored at 420 wide and wrapped in a `UIScale` sized from the
+  viewport width, so type stays readable on phones; the height shrinks to the available
+  screen instead of scaling a 700px design down to tiny text. It recomputes on viewport
+  changes, so phones, tablets, and desktop windows all get a correctly sized window.
 - **Draggable.** Grab the header anywhere that is not a button; the drag delta is divided by
   the current scale, and the window is clamped inside the screen edges.
 - **Mobile.** Comfortable hit targets, a keyboard-lift animation when the composer is
