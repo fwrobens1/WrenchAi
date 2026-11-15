@@ -207,7 +207,18 @@ function Loop.new(deps)
     self.cancelled = false
     self.toolsSupported = true
     self.recoveredHistory = false
+    self.onDone = deps.onDone
     return self
+end
+
+function Loop:GetMessages()
+    return self.messages
+end
+
+function Loop:SetMessages(messages)
+    self.messages = Util.Copy(messages or {})
+    self.continueCount = 0
+    self.recoveredHistory = false
 end
 
 function Loop:RefreshConfig(config)
@@ -473,6 +484,9 @@ function Loop:Send(text)
             self.ui:SetStatus("Stopped")
         else
             self.ui:SetStatus("Ready")
+        end
+        if self.onDone then
+            pcall(self.onDone)
         end
     end)
 end

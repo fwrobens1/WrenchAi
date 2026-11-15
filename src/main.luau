@@ -4,6 +4,7 @@ local Config = require("./config")
 local UI = require("./ui/window")
 local Tools = require("./tools/init")
 local Loop = require("./agent/loop")
+local Chats = require("./agent/chats")
 local Util = require("./util")
 
 local environment = Compat.Environment
@@ -88,7 +89,81 @@ local ctx = {
 }
 
 local tools = Tools.new(ctx)
-local loop = Loop.new({ ui = ui, tools = tools, config = config, compat = Compat })
+local chats = Chats.Load()
+local currentId = nil
+
+local loop
+loop = Loop.new({
+    ui = ui,
+    tools = tools,
+    config = config,
+    compat = Compat,
+    onDone = function()
+        local chat = nil
+        for _, entry in ipairs(chats) do
+            if entry.id == currentId then
+                chat = entry
+                break
+            end
+        end
+        if chat then
+            chat.messages = loop:GetMessages()
+            chat.preview = Chats.PreviewOf(chat.messages)
+            Chats.Save(chats)
+            ui:RenderSessions(chats, currentId)
+        end
+    end,
+})
+
+local function persistChats()
+    Chats.Save(chats)
+    ui:RenderSessions(chats, currentId)
+end
+
+local function findChat(id)
+    for _, entry in ipairs(chats) do
+        if entry.id == id then
+            return entry
+        end
+    end
+    return nil
+end
+
+local function ensureChat(text)
+    if currentId ~= nil then
+        return
+    end
+    local chat = {
+        id = Chats.NewId(),
+        title = Chats.TitleOf(text),
+        createdAt = os.time(),
+        preview = "",
+        messages = {},
+    }
+    table.insert(chats, 1, chat)
+    while #chats > Chats.MaxChats do
+        table.remove(chats)
+    end
+    currentId = chat.id
+end
+
+local function replayChat(messages)
+    local start = math.max(1, #messages - 60)
+    for index = start, #messages do
+        local message = messages[index]
+        if message.role == "user" then
+            local text = tostring(message.content or "")
+            if text:sub(1, 13) ~= "[TOOL RESULT:" then
+                ui:AddMessage("user", text)
+            end
+        elseif message.role == "assistant" then
+            local text = tostring(message.content or "")
+            if Util.Trim(text) ~= "" and not Chats.IsProtocolJson(text) then
+                ui:AddMessage("assistant", text)
+            end
+        end
+    end
+end
 
 ctx.isCancelled = function()
     return loop:IsCancelled()
@@ -114,6 +189,7 @@ ui.callbacks.onSend = function(text)
         ui:OpenSettings()
         return
     end
+    ensureChat(text)
     loop:Send(text)
 end
 
@@ -122,9 +198,55 @@ ui.callbacks.onStop = function()
 end
 
 ui.callbacks.onNewChat = function()
+    if loop.running then
+        return
+    end
     loop:Reset()
     ui:ClearMessages()
     ui:SetStatus("Ready")
+    currentId = nil
+    ui:RenderSessions(chats, nil)
+end
+
+ui.callbacks.onSwitchChat = function(id)
+    if loop.running or id == currentId then
+        return
+    end
+    local target = findChat(id)
+    if not target then
+        return
+    end
+    local previous = findChat(currentId)
+    if previous then
+        previous.messages = loop:GetMessages()
+        previous.preview = Chats.PreviewOf(previous.messages)
+    end
+    currentId = id
+    loop:SetMessages(target.messages or {})
+    ui:ClearMessages()
+    replayChat(target.messages or {})
+    ui:SetStatus("Ready")
+    persistChats()
+    ui:CloseSessions()
+end
+
+ui.callbacks.onDeleteChat = function(id)
+    if loop.running then
+        return
+    end
+    for index, entry in ipairs(chats) do
+        if entry.id == id then
+            table.remove(chats, index)
+            break
+        end
+    end
+    if currentId == id then
+        currentId = nil
+        loop:Reset()
+        ui:ClearMessages()
+        ui:SetStatus("Ready")
+    end
+    persistChats()
 end
 
 ui.callbacks.onSaveSettings = function(newConfig)
@@ -155,11 +277,14 @@ if Util.Trim(ctx.config.apiKey or "") == "" then
     ui:OpenSettings()
 end
 
+ui:RenderSessions(chats, nil)
+
 local api = {
     ui = ui,
     loop = loop,
     tools = tools,
     config = ctx.config,
+    chats = chats,
     toggle = function()
         ui:Toggle()
     end,

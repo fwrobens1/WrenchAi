@@ -169,6 +169,52 @@ api.ui.input.Text = "hello"
 api.ui:Submit()
 check(api.loop.messages[#api.loop.messages].content == "hi there", "UI submit reaches the loop")
 
+-- Chat history and sessions
+check(#api.chats == 1, "first send created a chat, got " .. tostring(#api.chats))
+check(api.chats[1].title == "hello", "chat title comes from the first message")
+check(#api.chats[1].messages == 2, "turn snapshotted into the chat")
+check(api.ui.profileName.Text == "Tester" and api.ui.profileHandle.Text == "@Tester", "profile card shows the player")
+
+api.ui.callbacks.onNewChat()
+check(#api.loop.messages == 0 and #api.chats == 1, "new chat keeps history entries")
+G.pushResponse('{"choices":[{"message":{"role":"assistant","content":"second reply"}}]}')
+api.ui.input.Text = "second chat"
+api.ui:Submit()
+check(#api.chats == 2 and api.chats[1].title == "second chat", "second chat stored newest-first")
+
+api.ui:OpenSessions()
+check(api.ui.sessionsFrame.Visible == true, "sessions panel opens")
+api.ui.callbacks.onSwitchChat(api.chats[2].id)
+check(api.ui.sessionsFrame.Visible == false, "switching closes the sessions panel")
+check(api.loop.messages[1].content == "hello", "switching restores the first chat's messages")
+check(#api.chats == 2, "switching keeps both chats")
+
+api.ui.callbacks.onDeleteChat(api.chats[1].id)
+check(#api.chats == 1, "delete removes the chat")
+api.ui.callbacks.onDeleteChat(api.chats[1].id)
+check(#api.chats == 0 and #api.loop.messages == 0, "deleting the open chat resets the loop")
+
+api.chats[1] = { id = "c1", title = "One", createdAt = os.time(), preview = "p1", messages = {} }
+api.chats[2] = { id = "c2", title = "Two", createdAt = os.time() - 7200, preview = "", messages = {} }
+api.ui:RenderSessions(api.chats, "c1")
+local rowCount = 0
+for _, child in ipairs(api.ui.sessionsScroll:GetChildren()) do
+    if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+        rowCount += 1
+    end
+end
+check(rowCount == 2, "sessions list renders two rows, got " .. tostring(rowCount))
+api.ui:RenderSessions({}, nil)
+rowCount = 0
+for _, child in ipairs(api.ui.sessionsScroll:GetChildren()) do
+    if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+        rowCount += 1
+    end
+end
+check(rowCount == 1, "empty sessions shows the placeholder")
+api.chats[1] = nil
+api.chats[2] = nil
+
 api.ui.callbacks.onSaveSettings({
     baseURL = "https://example.test/v1",
     model = "demo-model",

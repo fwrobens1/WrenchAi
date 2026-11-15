@@ -684,7 +684,10 @@ task = {
             error(err, 0)
         end
     end,
-    delay = function()
+    delay = function(seconds, fn, ...)
+        if type(fn) == "function" then
+            pcall(fn, ...)
+        end
         return nil
     end,
     cancel = function() end,

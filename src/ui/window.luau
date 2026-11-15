@@ -141,6 +141,13 @@ function ICONS.sparkle(parent, color)
     bar(parent, 8, 1.4, UDim2.fromScale(0.5, 0.5), -45, color)
 end
 
+function ICONS.clock(parent, color)
+    bar(parent, 11, 1.5, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.5, 11, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.5, 5, UDim2.new(0.5, 0, 0.5, -2.5), 0, color)
+    bar(parent, 5, 1.5, UDim2.new(0.5, 2.5, 0.5, 0), 0, color)
+end
+
 local function findGuiParent(compat)
     local gethui = compat.Lookup("gethui")
     if type(gethui) == "function" then
@@ -280,6 +287,7 @@ function UI:Build()
     self:BuildChat()
     self:BuildComposer()
     self:BuildSettings()
+    self:BuildSessions()
     self:BuildFab()
     self:BuildPill()
 
@@ -451,6 +459,9 @@ function UI:BuildHeader()
         if self.callbacks.onNewChat then
             pcall(self.callbacks.onNewChat)
         end
+    end)
+    self.historyButton = headerButton(-166, "clock", function()
+        self:OpenSessions()
     end)
 
     create("Frame", {
@@ -1041,6 +1052,382 @@ function UI:BuildSettings()
     end)
 end
 
+function UI:BuildSessions()
+    local frame = create("Frame", {
+        Name = "Sessions",
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = Theme.bg,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 10,
+        ClipsDescendants = true,
+    }, self.root)
+    withCorner(frame, Theme.radiusWindow)
+    self.sessionsFrame = frame
+
+    local back = create("TextButton", {
+        Size = UDim2.fromOffset(30, 30),
+        Position = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Theme.surfaceAlt,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, frame)
+    withCorner(back, 9)
+    local backIcon = create("Frame", {
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+    }, back)
+    ICONS.back(backIcon, Theme.muted)
+    back.MouseEnter:Connect(function()
+        tween(back, { BackgroundTransparency = 0 }, 0.14)
+    end)
+    back.MouseLeave:Connect(function()
+        tween(back, { BackgroundTransparency = 1 }, 0.14)
+    end)
+    back.MouseButton1Click:Connect(function()
+        self:CloseSessions()
+    end)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(52, 8),
+        Size = UDim2.new(1, -70, 0, 20),
+        Font = Theme.fontBold,
+        TextSize = 15,
+        TextColor3 = Theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Chats",
+        ZIndex = 12,
+    }, frame)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(52, 28),
+        Size = UDim2.new(1, -70, 0, 14),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Your conversations, saved on this device",
+        ZIndex = 12,
+    }, frame)
+
+    local newChat = create("TextButton", {
+        Position = UDim2.new(0, 14, 0, 54),
+        Size = UDim2.new(1, -28, 0, 40),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+        Text = "New chat",
+        Font = Theme.fontBold,
+        TextSize = 12,
+        TextColor3 = Theme.white,
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, frame)
+    withCorner(newChat, 13)
+    newChat.MouseEnter:Connect(function()
+        tween(newChat, { BackgroundColor3 = Theme.accentDeep }, 0.14)
+    end)
+    newChat.MouseLeave:Connect(function()
+        tween(newChat, { BackgroundColor3 = Theme.accent }, 0.14)
+    end)
+    newChat.MouseButton1Click:Connect(function()
+        if self.callbacks.onNewChat then
+            pcall(self.callbacks.onNewChat)
+        end
+        self:CloseSessions()
+    end)
+
+    local scroll = create("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, 104),
+        Size = UDim2.new(1, 0, 1, -104 - 92),
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.line,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ZIndex = 11,
+    }, frame)
+    withList(scroll, 6)
+    withPadding(scroll, 2, 14, 10, 14)
+    self.sessionsScroll = scroll
+
+    local profile = create("Frame", {
+        Position = UDim2.new(0, 14, 1, -84),
+        Size = UDim2.new(1, -28, 0, 70),
+        BackgroundColor3 = Theme.surface,
+        BorderSizePixel = 0,
+        ZIndex = 12,
+    }, frame)
+    withCorner(profile, 14)
+    withStroke(profile, Theme.lineSoft, 1, 0.35)
+
+    self.profileAvatar = create("Frame", {
+        Size = UDim2.fromOffset(40, 40),
+        Position = UDim2.fromOffset(12, 15),
+        BackgroundColor3 = Theme.surfaceHi,
+        BorderSizePixel = 0,
+    }, profile)
+    withCorner(self.profileAvatar, 20)
+    self.profileImage = create("ImageLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        BorderSizePixel = 0,
+        Visible = false,
+    }, self.profileAvatar)
+    withCorner(self.profileImage, 20)
+    self.profileLetter = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 16,
+        TextColor3 = Theme.white,
+        Text = "?",
+    }, self.profileAvatar)
+
+    self.profileName = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 10),
+        Size = UDim2.new(1, -76, 0, 18),
+        Font = Theme.fontBold,
+        TextSize = 13,
+        TextColor3 = Theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "Player",
+    }, profile)
+    self.profileHandle = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 29),
+        Size = UDim2.new(1, -76, 0, 14),
+        Font = Theme.font,
+        TextSize = 10,
+        TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "@player",
+    }, profile)
+    self.profileMeta = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 45),
+        Size = UDim2.new(1, -76, 0, 14),
+        Font = Theme.fontCode,
+        TextSize = 8,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "",
+    }, profile)
+
+    self:FillProfile()
+end
+
+function UI:FillProfile()
+    local player = Players.LocalPlayer
+    local name = "Player"
+    local displayName = "Player"
+    local userId = 0
+    pcall(function()
+        name = tostring(player.Name)
+        displayName = tostring(player.DisplayName)
+        userId = tonumber(player.UserId) or 0
+    end)
+    if self.profileName then
+        self.profileName.Text = displayName
+    end
+    if self.profileHandle then
+        self.profileHandle.Text = "@" .. name
+    end
+    if self.profileMeta then
+        self.profileMeta.Text = "User ID "
+            .. tostring(userId)
+            .. " · "
+            .. tostring(self.compat.ExecutorName or "executor")
+    end
+    if self.profileLetter then
+        self.profileLetter.Text = string.upper(string.sub(name, 1, 1))
+    end
+    task.spawn(function()
+        local ok, url = pcall(function()
+            return Players:GetUserThumbnailAsync(
+                userId,
+                Enum.ThumbnailType.HeadShot,
+                Enum.ThumbnailSize.Size420x420
+            )
+        end)
+        if ok and type(url) == "string" and #url > 0 and not self.destroyed and self.profileImage then
+            self.profileImage.Image = url
+            self.profileImage.Visible = true
+            self.profileLetter.Visible = false
+        end
+    end)
+end
+
+function UI:RenderSessions(list, currentId)
+    self.lastSessions = list or {}
+    self.lastCurrentId = currentId
+    if not self.sessionsScroll then
+        return
+    end
+    for _, child in ipairs(self.sessionsScroll:GetChildren()) do
+        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            child:Destroy()
+        end
+    end
+
+    if #self.lastSessions == 0 then
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = 0,
+            Font = Theme.font,
+            TextSize = 10,
+            TextColor3 = Theme.faint,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Center,
+            Text = "No chats yet. Tap New chat to start one.",
+            ZIndex = 11,
+        }, self.sessionsScroll)
+        return
+    end
+
+    local order = 0
+    for _, chat in ipairs(self.lastSessions) do
+        order += 1
+        local active = chat.id == currentId
+        local row = create("Frame", {
+            BackgroundColor3 = Theme.surface,
+            BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 0, 56),
+            LayoutOrder = order,
+            ZIndex = 11,
+        }, self.sessionsScroll)
+        withCorner(row, 12)
+        withStroke(row, active and Theme.accent or Theme.lineSoft, 1, active and 0.8 or 0.35)
+
+        local main = create("TextButton", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, -36, 1, 0),
+            Text = "",
+            AutoButtonColor = false,
+            ZIndex = 12,
+        }, row)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 8),
+            Size = UDim2.new(1, -64, 0, 16),
+            Font = Theme.fontBold,
+            TextSize = 12,
+            TextColor3 = active and Theme.accent or Theme.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = chat.title or "New chat",
+            ZIndex = 12,
+        }, row)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 28),
+            Size = UDim2.new(1, -64, 0, 14),
+            Font = Theme.font,
+            TextSize = 9,
+            TextColor3 = Theme.faint,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = chat.preview or "",
+            ZIndex = 12,
+        }, row)
+        local age = math.max(0, (os.time() or 0) - (tonumber(chat.createdAt) or 0))
+        local ageText = "just now"
+        if age >= 86400 then
+            ageText = tostring(math.floor(age / 86400)) .. "d ago"
+        elseif age >= 3600 then
+            ageText = tostring(math.floor(age / 3600)) .. "h ago"
+        elseif age >= 60 then
+            ageText = tostring(math.floor(age / 60)) .. "m ago"
+        end
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.new(1, -42, 0, 9),
+            Size = UDim2.fromOffset(34, 12),
+            Font = Theme.font,
+            TextSize = 8,
+            TextColor3 = Theme.faint,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Text = ageText,
+            ZIndex = 12,
+        }, row)
+
+        local del = create("TextButton", {
+            Size = UDim2.fromOffset(26, 26),
+            Position = UDim2.new(1, -5, 0, 15),
+            BackgroundColor3 = Theme.surfaceHi,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Text = "",
+            AutoButtonColor = false,
+            ZIndex = 13,
+        }, row)
+        withCorner(del, 9)
+        local delIcon = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromScale(0.5, 0.5),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+        }, del)
+        ICONS.close(delIcon, Theme.faint)
+        del.MouseEnter:Connect(function()
+            tween(del, { BackgroundTransparency = 0 }, 0.12)
+        end)
+        del.MouseLeave:Connect(function()
+            tween(del, { BackgroundTransparency = 1 }, 0.12)
+        end)
+        del.MouseButton1Click:Connect(function()
+            if self.callbacks.onDeleteChat then
+                pcall(self.callbacks.onDeleteChat, chat.id)
+            end
+        end)
+        main.MouseButton1Click:Connect(function()
+            if self.callbacks.onSwitchChat then
+                pcall(self.callbacks.onSwitchChat, chat.id)
+            end
+        end)
+    end
+end
+
+function UI:OpenSessions()
+    if not self.root.Visible then
+        self:Show()
+    end
+    if self.settingsFrame and self.settingsFrame.Visible then
+        self.settingsFrame.Visible = false
+    end
+    self:RenderSessions(self.lastSessions or {}, self.lastCurrentId)
+    self.sessionsFrame.Visible = true
+    self.sessionsFrame.Position = UDim2.new(-1, -DESIGN_WIDTH, 0, 0)
+    tween(self.sessionsFrame, { Position = UDim2.new(0, 0, 0, 0) }, 0.22, Enum.EasingStyle.Quint)
+end
+
+function UI:CloseSessions()
+    if not self.sessionsFrame or not self.sessionsFrame.Visible then
+        return
+    end
+    tween(self.sessionsFrame, {
+        Position = UDim2.new(-1, -DESIGN_WIDTH, 0, 0),
+    }, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    task.delay(0.2, function()
+        if not self.destroyed and self.sessionsFrame then
+            self.sessionsFrame.Visible = false
+        end
+    end)
+end
+
 function UI:BuildFab()
     self.fab = create("TextButton", {
         Name = "Fab",
@@ -1207,6 +1594,9 @@ function UI:OpenSettings()
 
     if not self.root.Visible then
         self:Show()
+    end
+    if self.sessionsFrame and self.sessionsFrame.Visible then
+        self.sessionsFrame.Visible = false
     end
     self.settingsFrame.Visible = true
     self.settingsFrame.Position = UDim2.new(1, DESIGN_WIDTH, 0, 0)

@@ -11,6 +11,163 @@ local function __require(id)
     __cache[id] = value
     return value
 end
+__modules["agent/chats"] = function()
+local HttpService = game:GetService("HttpService")
+local Compat = __require("compat")
+local Util = __require("util")
+
+local Chats = {}
+local FOLDER = "WrenchAi"
+local FILE = FOLDER .. "/history.json"
+
+Chats.MaxChats = 30
+Chats.MaxMessages = 160
+Chats.MaxChars = 60000
+
+function Chats.NewId()
+    return tostring(os.time()) .. "-" .. tostring(math.random(1000, 9999))
+end
+
+function Chats.TitleOf(text)
+    local title = Util.Truncate(Util.Trim(text or ""), 34)
+    if title == "" then
+        return "New chat"
+    end
+    return title
+end
+
+function Chats.PreviewOf(messages)
+    for index = #messages, 1, -1 do
+        local message = messages[index]
+        if message.role == "assistant" then
+            local text = Util.Trim(tostring(message.content or ""))
+            if text ~= "" and not Chats.IsProtocolJson(text) then
+                return Util.Truncate(text, 72)
+            end
+        end
+    end
+    return ""
+end
+
+function Chats.IsProtocolJson(text)
+    local value = Util.Trim(tostring(text or ""))
+    local fenced = value:match("^```[%w]*%s*(.-)%s*```$")
+    if fenced then
+        value = Util.Trim(fenced)
+    end
+    if value:sub(1, 1) ~= "{" or value:sub(-1) ~= "}" then
+        return false
+    end
+    return value:find('"tool"', 1, true) ~= nil
+end
+
+local function isTurnStart(message)
+    if message.role ~= "user" then
+        return false
+    end
+    return tostring(message.content or ""):sub(1, 13) ~= "[TOOL RESULT:"
+end
+
+local function messageChars(message)
+    return #tostring(message.content or "") + #tostring(message.reasoning_content or "")
+end
+
+function Chats.Trim(messages)
+    local kept = {}
+    for index = math.max(1, #messages - Chats.MaxMessages + 1), #messages do
+        table.insert(kept, messages[index])
+    end
+
+    local total = 0
+    for _, message in ipairs(kept) do
+        total += messageChars(message)
+    end
+    while total > Chats.MaxChars and #kept > 1 do
+        local cut = nil
+        for index = 2, #kept do
+            if isTurnStart(kept[index]) then
+                cut = index
+                break
+            end
+        end
+        if not cut then
+            break
+        end
+        for index = 1, cut - 1 do
+            total -= messageChars(kept[index])
+        end
+        local rest = {}
+        for index = cut, #kept do
+            table.insert(rest, kept[index])
+        end
+        kept = rest
+    end
+    return kept
+end
+
+function Chats.Load()
+    local chats = {}
+    local readfile = Compat.Lookup("readfile")
+    local isfile = Compat.Lookup("isfile")
+    if type(readfile) == "function" and type(isfile) == "function" then
+        local existsOk, exists = pcall(isfile, FILE)
+        if existsOk and exists then
+            local readOk, raw = pcall(readfile, FILE)
+            if readOk and type(raw) == "string" and #raw > 0 then
+                local ok, decoded = pcall(function()
+                    return HttpService:JSONDecode(raw)
+                end)
+                if ok and type(decoded) == "table" then
+                    for _, chat in ipairs(decoded) do
+                        if type(chat) == "table" and type(chat.id) == "string"
+                            and type(chat.messages) == "table" then
+                            table.insert(chats, {
+                                id = chat.id,
+                                title = type(chat.title) == "string" and chat.title or "New chat",
+                                createdAt = tonumber(chat.createdAt) or os.time(),
+                                messages = chat.messages,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return chats
+end
+
+function Chats.Save(chats)
+    local writefile = Compat.Lookup("writefile")
+    if type(writefile) ~= "function" then
+        return false
+    end
+    local makefolder = Compat.Lookup("makefolder")
+    if type(makefolder) == "function" then
+        pcall(makefolder, FOLDER)
+    end
+    local trimmed = {}
+    for index = 1, math.min(#chats, Chats.MaxChats) do
+        local chat = chats[index]
+        table.insert(trimmed, {
+            id = chat.id,
+            title = chat.title,
+            createdAt = chat.createdAt,
+            messages = Chats.Trim(chat.messages or {}),
+        })
+    end
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(trimmed)
+    end)
+    if not ok then
+        return false
+    end
+    pcall(writefile, FILE, encoded)
+    return true
+end
+
+return Chats
+
+end
 __modules["agent/loop"] = function()
 local HttpService = game:GetService("HttpService")
 local Client = __require("llm/client")
@@ -221,7 +378,18 @@ function Loop.new(deps)
     self.cancelled = false
     self.toolsSupported = true
     self.recoveredHistory = false
+    self.onDone = deps.onDone
     return self
+end
+
+function Loop:GetMessages()
+    return self.messages
+end
+
+function Loop:SetMessages(messages)
+    self.messages = Util.Copy(messages or {})
+    self.continueCount = 0
+    self.recoveredHistory = false
 end
 
 function Loop:RefreshConfig(config)
@@ -487,6 +655,9 @@ function Loop:Send(text)
             self.ui:SetStatus("Stopped")
         else
             self.ui:SetStatus("Ready")
+        end
+        if self.onDone then
+            pcall(self.onDone)
         end
     end)
 end
@@ -1024,6 +1195,7 @@ local Config = __require("config")
 local UI = __require("ui/window")
 local Tools = __require("tools/init")
 local Loop = __require("agent/loop")
+local Chats = __require("agent/chats")
 local Util = __require("util")
 
 local environment = Compat.Environment
@@ -1108,7 +1280,81 @@ local ctx = {
 }
 
 local tools = Tools.new(ctx)
-local loop = Loop.new({ ui = ui, tools = tools, config = config, compat = Compat })
+local chats = Chats.Load()
+local currentId = nil
+
+local loop
+loop = Loop.new({
+    ui = ui,
+    tools = tools,
+    config = config,
+    compat = Compat,
+    onDone = function()
+        local chat = nil
+        for _, entry in ipairs(chats) do
+            if entry.id == currentId then
+                chat = entry
+                break
+            end
+        end
+        if chat then
+            chat.messages = loop:GetMessages()
+            chat.preview = Chats.PreviewOf(chat.messages)
+            Chats.Save(chats)
+            ui:RenderSessions(chats, currentId)
+        end
+    end,
+})
+
+local function persistChats()
+    Chats.Save(chats)
+    ui:RenderSessions(chats, currentId)
+end
+
+local function findChat(id)
+    for _, entry in ipairs(chats) do
+        if entry.id == id then
+            return entry
+        end
+    end
+    return nil
+end
+
+local function ensureChat(text)
+    if currentId ~= nil then
+        return
+    end
+    local chat = {
+        id = Chats.NewId(),
+        title = Chats.TitleOf(text),
+        createdAt = os.time(),
+        preview = "",
+        messages = {},
+    }
+    table.insert(chats, 1, chat)
+    while #chats > Chats.MaxChats do
+        table.remove(chats)
+    end
+    currentId = chat.id
+end
+
+local function replayChat(messages)
+    local start = math.max(1, #messages - 60)
+    for index = start, #messages do
+        local message = messages[index]
+        if message.role == "user" then
+            local text = tostring(message.content or "")
+            if text:sub(1, 13) ~= "[TOOL RESULT:" then
+                ui:AddMessage("user", text)
+            end
+        elseif message.role == "assistant" then
+            local text = tostring(message.content or "")
+            if Util.Trim(text) ~= "" and not Chats.IsProtocolJson(text) then
+                ui:AddMessage("assistant", text)
+            end
+        end
+    end
+end
 
 ctx.isCancelled = function()
     return loop:IsCancelled()
@@ -1134,6 +1380,7 @@ ui.callbacks.onSend = function(text)
         ui:OpenSettings()
         return
     end
+    ensureChat(text)
     loop:Send(text)
 end
 
@@ -1142,9 +1389,55 @@ ui.callbacks.onStop = function()
 end
 
 ui.callbacks.onNewChat = function()
+    if loop.running then
+        return
+    end
     loop:Reset()
     ui:ClearMessages()
     ui:SetStatus("Ready")
+    currentId = nil
+    ui:RenderSessions(chats, nil)
+end
+
+ui.callbacks.onSwitchChat = function(id)
+    if loop.running or id == currentId then
+        return
+    end
+    local target = findChat(id)
+    if not target then
+        return
+    end
+    local previous = findChat(currentId)
+    if previous then
+        previous.messages = loop:GetMessages()
+        previous.preview = Chats.PreviewOf(previous.messages)
+    end
+    currentId = id
+    loop:SetMessages(target.messages or {})
+    ui:ClearMessages()
+    replayChat(target.messages or {})
+    ui:SetStatus("Ready")
+    persistChats()
+    ui:CloseSessions()
+end
+
+ui.callbacks.onDeleteChat = function(id)
+    if loop.running then
+        return
+    end
+    for index, entry in ipairs(chats) do
+        if entry.id == id then
+            table.remove(chats, index)
+            break
+        end
+    end
+    if currentId == id then
+        currentId = nil
+        loop:Reset()
+        ui:ClearMessages()
+        ui:SetStatus("Ready")
+    end
+    persistChats()
 end
 
 ui.callbacks.onSaveSettings = function(newConfig)
@@ -1175,11 +1468,14 @@ if Util.Trim(ctx.config.apiKey or "") == "" then
     ui:OpenSettings()
 end
 
+ui:RenderSessions(chats, nil)
+
 local api = {
     ui = ui,
     loop = loop,
     tools = tools,
     config = ctx.config,
+    chats = chats,
     toggle = function()
         ui:Toggle()
     end,
@@ -3415,6 +3711,13 @@ function ICONS.sparkle(parent, color)
     bar(parent, 8, 1.4, UDim2.fromScale(0.5, 0.5), -45, color)
 end
 
+function ICONS.clock(parent, color)
+    bar(parent, 11, 1.5, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.5, 11, UDim2.fromScale(0.5, 0.5), 0, color)
+    bar(parent, 1.5, 5, UDim2.new(0.5, 0, 0.5, -2.5), 0, color)
+    bar(parent, 5, 1.5, UDim2.new(0.5, 2.5, 0.5, 0), 0, color)
+end
+
 local function findGuiParent(compat)
     local gethui = compat.Lookup("gethui")
     if type(gethui) == "function" then
@@ -3554,6 +3857,7 @@ function UI:Build()
     self:BuildChat()
     self:BuildComposer()
     self:BuildSettings()
+    self:BuildSessions()
     self:BuildFab()
     self:BuildPill()
 
@@ -3725,6 +4029,9 @@ function UI:BuildHeader()
         if self.callbacks.onNewChat then
             pcall(self.callbacks.onNewChat)
         end
+    end)
+    self.historyButton = headerButton(-166, "clock", function()
+        self:OpenSessions()
     end)
 
     create("Frame", {
@@ -4315,6 +4622,382 @@ function UI:BuildSettings()
     end)
 end
 
+function UI:BuildSessions()
+    local frame = create("Frame", {
+        Name = "Sessions",
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = Theme.bg,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 10,
+        ClipsDescendants = true,
+    }, self.root)
+    withCorner(frame, Theme.radiusWindow)
+    self.sessionsFrame = frame
+
+    local back = create("TextButton", {
+        Size = UDim2.fromOffset(30, 30),
+        Position = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = Theme.surfaceAlt,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, frame)
+    withCorner(back, 9)
+    local backIcon = create("Frame", {
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+    }, back)
+    ICONS.back(backIcon, Theme.muted)
+    back.MouseEnter:Connect(function()
+        tween(back, { BackgroundTransparency = 0 }, 0.14)
+    end)
+    back.MouseLeave:Connect(function()
+        tween(back, { BackgroundTransparency = 1 }, 0.14)
+    end)
+    back.MouseButton1Click:Connect(function()
+        self:CloseSessions()
+    end)
+
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(52, 8),
+        Size = UDim2.new(1, -70, 0, 20),
+        Font = Theme.fontBold,
+        TextSize = 15,
+        TextColor3 = Theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Chats",
+        ZIndex = 12,
+    }, frame)
+    create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(52, 28),
+        Size = UDim2.new(1, -70, 0, 14),
+        Font = Theme.font,
+        TextSize = 9,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Your conversations, saved on this device",
+        ZIndex = 12,
+    }, frame)
+
+    local newChat = create("TextButton", {
+        Position = UDim2.new(0, 14, 0, 54),
+        Size = UDim2.new(1, -28, 0, 40),
+        BackgroundColor3 = Theme.accent,
+        BorderSizePixel = 0,
+        Text = "New chat",
+        Font = Theme.fontBold,
+        TextSize = 12,
+        TextColor3 = Theme.white,
+        AutoButtonColor = false,
+        ZIndex = 12,
+    }, frame)
+    withCorner(newChat, 13)
+    newChat.MouseEnter:Connect(function()
+        tween(newChat, { BackgroundColor3 = Theme.accentDeep }, 0.14)
+    end)
+    newChat.MouseLeave:Connect(function()
+        tween(newChat, { BackgroundColor3 = Theme.accent }, 0.14)
+    end)
+    newChat.MouseButton1Click:Connect(function()
+        if self.callbacks.onNewChat then
+            pcall(self.callbacks.onNewChat)
+        end
+        self:CloseSessions()
+    end)
+
+    local scroll = create("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, 104),
+        Size = UDim2.new(1, 0, 1, -104 - 92),
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.line,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ZIndex = 11,
+    }, frame)
+    withList(scroll, 6)
+    withPadding(scroll, 2, 14, 10, 14)
+    self.sessionsScroll = scroll
+
+    local profile = create("Frame", {
+        Position = UDim2.new(0, 14, 1, -84),
+        Size = UDim2.new(1, -28, 0, 70),
+        BackgroundColor3 = Theme.surface,
+        BorderSizePixel = 0,
+        ZIndex = 12,
+    }, frame)
+    withCorner(profile, 14)
+    withStroke(profile, Theme.lineSoft, 1, 0.35)
+
+    self.profileAvatar = create("Frame", {
+        Size = UDim2.fromOffset(40, 40),
+        Position = UDim2.fromOffset(12, 15),
+        BackgroundColor3 = Theme.surfaceHi,
+        BorderSizePixel = 0,
+    }, profile)
+    withCorner(self.profileAvatar, 20)
+    self.profileImage = create("ImageLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        BorderSizePixel = 0,
+        Visible = false,
+    }, self.profileAvatar)
+    withCorner(self.profileImage, 20)
+    self.profileLetter = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Font = Theme.fontBold,
+        TextSize = 16,
+        TextColor3 = Theme.white,
+        Text = "?",
+    }, self.profileAvatar)
+
+    self.profileName = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 10),
+        Size = UDim2.new(1, -76, 0, 18),
+        Font = Theme.fontBold,
+        TextSize = 13,
+        TextColor3 = Theme.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "Player",
+    }, profile)
+    self.profileHandle = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 29),
+        Size = UDim2.new(1, -76, 0, 14),
+        Font = Theme.font,
+        TextSize = 10,
+        TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "@player",
+    }, profile)
+    self.profileMeta = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(64, 45),
+        Size = UDim2.new(1, -76, 0, 14),
+        Font = Theme.fontCode,
+        TextSize = 8,
+        TextColor3 = Theme.faint,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = "",
+    }, profile)
+
+    self:FillProfile()
+end
+
+function UI:FillProfile()
+    local player = Players.LocalPlayer
+    local name = "Player"
+    local displayName = "Player"
+    local userId = 0
+    pcall(function()
+        name = tostring(player.Name)
+        displayName = tostring(player.DisplayName)
+        userId = tonumber(player.UserId) or 0
+    end)
+    if self.profileName then
+        self.profileName.Text = displayName
+    end
+    if self.profileHandle then
+        self.profileHandle.Text = "@" .. name
+    end
+    if self.profileMeta then
+        self.profileMeta.Text = "User ID "
+            .. tostring(userId)
+            .. " · "
+            .. tostring(self.compat.ExecutorName or "executor")
+    end
+    if self.profileLetter then
+        self.profileLetter.Text = string.upper(string.sub(name, 1, 1))
+    end
+    task.spawn(function()
+        local ok, url = pcall(function()
+            return Players:GetUserThumbnailAsync(
+                userId,
+                Enum.ThumbnailType.HeadShot,
+                Enum.ThumbnailSize.Size420x420
+            )
+        end)
+        if ok and type(url) == "string" and #url > 0 and not self.destroyed and self.profileImage then
+            self.profileImage.Image = url
+            self.profileImage.Visible = true
+            self.profileLetter.Visible = false
+        end
+    end)
+end
+
+function UI:RenderSessions(list, currentId)
+    self.lastSessions = list or {}
+    self.lastCurrentId = currentId
+    if not self.sessionsScroll then
+        return
+    end
+    for _, child in ipairs(self.sessionsScroll:GetChildren()) do
+        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            child:Destroy()
+        end
+    end
+
+    if #self.lastSessions == 0 then
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = 0,
+            Font = Theme.font,
+            TextSize = 10,
+            TextColor3 = Theme.faint,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Center,
+            Text = "No chats yet. Tap New chat to start one.",
+            ZIndex = 11,
+        }, self.sessionsScroll)
+        return
+    end
+
+    local order = 0
+    for _, chat in ipairs(self.lastSessions) do
+        order += 1
+        local active = chat.id == currentId
+        local row = create("Frame", {
+            BackgroundColor3 = Theme.surface,
+            BorderSizePixel = 0,
+            Size = UDim2.new(1, 0, 0, 56),
+            LayoutOrder = order,
+            ZIndex = 11,
+        }, self.sessionsScroll)
+        withCorner(row, 12)
+        withStroke(row, active and Theme.accent or Theme.lineSoft, 1, active and 0.8 or 0.35)
+
+        local main = create("TextButton", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, -36, 1, 0),
+            Text = "",
+            AutoButtonColor = false,
+            ZIndex = 12,
+        }, row)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 8),
+            Size = UDim2.new(1, -64, 0, 16),
+            Font = Theme.fontBold,
+            TextSize = 12,
+            TextColor3 = active and Theme.accent or Theme.text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = chat.title or "New chat",
+            ZIndex = 12,
+        }, row)
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(12, 28),
+            Size = UDim2.new(1, -64, 0, 14),
+            Font = Theme.font,
+            TextSize = 9,
+            TextColor3 = Theme.faint,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = chat.preview or "",
+            ZIndex = 12,
+        }, row)
+        local age = math.max(0, (os.time() or 0) - (tonumber(chat.createdAt) or 0))
+        local ageText = "just now"
+        if age >= 86400 then
+            ageText = tostring(math.floor(age / 86400)) .. "d ago"
+        elseif age >= 3600 then
+            ageText = tostring(math.floor(age / 3600)) .. "h ago"
+        elseif age >= 60 then
+            ageText = tostring(math.floor(age / 60)) .. "m ago"
+        end
+        create("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.new(1, -42, 0, 9),
+            Size = UDim2.fromOffset(34, 12),
+            Font = Theme.font,
+            TextSize = 8,
+            TextColor3 = Theme.faint,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Text = ageText,
+            ZIndex = 12,
+        }, row)
+
+        local del = create("TextButton", {
+            Size = UDim2.fromOffset(26, 26),
+            Position = UDim2.new(1, -5, 0, 15),
+            BackgroundColor3 = Theme.surfaceHi,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Text = "",
+            AutoButtonColor = false,
+            ZIndex = 13,
+        }, row)
+        withCorner(del, 9)
+        local delIcon = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromScale(0.5, 0.5),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundTransparency = 1,
+        }, del)
+        ICONS.close(delIcon, Theme.faint)
+        del.MouseEnter:Connect(function()
+            tween(del, { BackgroundTransparency = 0 }, 0.12)
+        end)
+        del.MouseLeave:Connect(function()
+            tween(del, { BackgroundTransparency = 1 }, 0.12)
+        end)
+        del.MouseButton1Click:Connect(function()
+            if self.callbacks.onDeleteChat then
+                pcall(self.callbacks.onDeleteChat, chat.id)
+            end
+        end)
+        main.MouseButton1Click:Connect(function()
+            if self.callbacks.onSwitchChat then
+                pcall(self.callbacks.onSwitchChat, chat.id)
+            end
+        end)
+    end
+end
+
+function UI:OpenSessions()
+    if not self.root.Visible then
+        self:Show()
+    end
+    if self.settingsFrame and self.settingsFrame.Visible then
+        self.settingsFrame.Visible = false
+    end
+    self:RenderSessions(self.lastSessions or {}, self.lastCurrentId)
+    self.sessionsFrame.Visible = true
+    self.sessionsFrame.Position = UDim2.new(-1, -DESIGN_WIDTH, 0, 0)
+    tween(self.sessionsFrame, { Position = UDim2.new(0, 0, 0, 0) }, 0.22, Enum.EasingStyle.Quint)
+end
+
+function UI:CloseSessions()
+    if not self.sessionsFrame or not self.sessionsFrame.Visible then
+        return
+    end
+    tween(self.sessionsFrame, {
+        Position = UDim2.new(-1, -DESIGN_WIDTH, 0, 0),
+    }, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    task.delay(0.2, function()
+        if not self.destroyed and self.sessionsFrame then
+            self.sessionsFrame.Visible = false
+        end
+    end)
+end
+
 function UI:BuildFab()
     self.fab = create("TextButton", {
         Name = "Fab",
@@ -4481,6 +5164,9 @@ function UI:OpenSettings()
 
     if not self.root.Visible then
         self:Show()
+    end
+    if self.sessionsFrame and self.sessionsFrame.Visible then
+        self.sessionsFrame.Visible = false
     end
     self.settingsFrame.Visible = true
     self.settingsFrame.Position = UDim2.new(1, DESIGN_WIDTH, 0, 0)
