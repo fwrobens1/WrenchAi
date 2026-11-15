@@ -1,0 +1,45 @@
+name: verify-api-key
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: WRENCHAI_API_KEY
+    steps:
+      - name: Check the endpoint with the environment secret
+        env:
+          WRENCHAI_API_KEY: ${{ secrets.WRENCHAI_API_KEY }}
+          BASE_URL: ${{ vars.WRENCHAI_BASE_URL || 'https://api.refuseless.com/v1' }}
+          MODEL: ${{ vars.WRENCHAI_MODEL || 'glm-5.3-abliterated' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WRENCHAI_API_KEY:-}" ]; then
+            echo "::error::WRENCHAI_API_KEY is not set in the WRENCHAI_API_KEY environment"
+            exit 1
+          fi
+          echo "::add-mask::$WRENCHAI_API_KEY"
+
+          code=$(curl -sS -o /tmp/models.json -w '%{http_code}' \
+            -H "Authorization: Bearer $WRENCHAI_API_KEY" \
+            "$BASE_URL/models")
+          echo "GET $BASE_URL/models -> $code"
+          if [ "$code" != "200" ]; then
+            head -c 400 /tmp/models.json || true
+            echo
+            echo "::error::The key was rejected by the endpoint (HTTP $code)"
+            exit 1
+          fi
+
+          if ! grep -q "$MODEL" /tmp/models.json; then
+            echo "::warning::Key is valid but $MODEL was not listed in /models"
+          else
+            echo "Key is valid and $MODEL is available"
+          fi
