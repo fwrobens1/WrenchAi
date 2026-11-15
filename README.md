@@ -144,8 +144,8 @@ has `writefile`; otherwise they last for the session.
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| Base URL | `https://api.refuseless.com/v1` | Any OpenAI-compatible `/chat/completions` root |
-| Model | `glm-5.3-abliterated` | Sent as `model` |
+| Base URL | `https://api.reflection.ai/openai/v1` | Any OpenAI-compatible `/chat/completions` root |
+| Model | `Beam-1.0-501B-A23B` | Sent as `model` |
 | API key | empty | `Authorization: Bearer ...`; can be injected at runtime via `getgenv().WrenchAiApiKey` |
 | Temperature | `0.7` | |
 | Max agent steps | `12` | 1–30 tool/answer iterations per message |
@@ -165,7 +165,13 @@ getgenv().WrenchAiApiKey = "<key>"
 loadstring(game:HttpGet("https://raw.githubusercontent.com/fwrobens1/WrenchAi/main/loader.luau"))()
 ```
 
-### About the `WRENCHAI_API_KEY` GitHub environment
+### About the API key and the GitHub environment
+
+The default backend is Reflection (`api.reflection.ai`), model `Beam-1.0-501B-A23B`. The
+repo's `verify-api-key` workflow reads `secrets.REFLECTION_API_KEY` (or the existing
+`WRENCHAI_API_KEY` secret if you just replace its value) from the `WRENCHAI_API_KEY`
+environment and runs a 5-token completion against `/chat/completions`, so a bad key or
+retired model fails CI instead of failing in-game.
 
 GitHub **environment secrets are write-only** and are decrypted only inside an Actions
 runner. An executor script running on a phone has no GitHub token and cannot read them, so
@@ -174,15 +180,14 @@ WrenchAi does not try. Because this repository is public, embedding the key in
 
 What the environment secret is good for:
 
-- CI that calls the endpoint with the secret to verify the key still works, without ever
-  writing it to the bundle (for example, `curl /models` inside a job attached to the
-  `WRENCHAI_API_KEY` environment).
+- CI that verifies the key and model still work, without writing the key to the bundle.
 - A future proxy on your own host (the EC2 box behind Tailscale, for example): the proxy
-  holds `WRENCHAI_API_KEY` and forwards `/v1/chat/completions`, and the in-game config only
-  knows the proxy URL. That is the only design that keeps a real key out of every client.
+  holds the key and forwards `/v1/chat/completions`, and the in-game config only knows the
+  proxy URL. That is the only design that keeps a real key out of every client.
 
 Until a proxy exists, set the key once in the on-device settings panel or inject it with
-`getgenv().WrenchAiApiKey` at load time.
+`getgenv().WrenchAiApiKey` at load time. A saved `config.json` that still pointed at the
+retired refuseless endpoint is migrated to Reflection automatically on the next load.
 
 ## Tools
 

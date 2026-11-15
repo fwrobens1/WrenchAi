@@ -11,8 +11,8 @@ end
 check(type(api) == "table", "main returns a table")
 check(G.WrenchAi == api, "getgenv().WrenchAi is exported")
 check(api.ui ~= nil and api.loop ~= nil and api.tools ~= nil, "ui/loop/tools exist")
-check(api.config.model == "glm-5.3-abliterated", "default model")
-check(api.config.baseURL == "https://api.refuseless.com/v1", "default base URL")
+check(api.config.model == "Beam-1.0-501B-A23B", "default model")
+check(api.config.baseURL == "https://api.reflection.ai/openai/v1", "default base URL")
 check(api.ui.settingsFrame.Visible == true, "settings auto-open without an API key")
 check(api.ui.root ~= nil, "window root exists")
 

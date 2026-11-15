@@ -13,33 +13,42 @@ jobs:
     runs-on: ubuntu-latest
     environment: WRENCHAI_API_KEY
     steps:
-      - name: Check the endpoint with the environment secret
+      - name: Run a one-token completion with the environment secret
         env:
-          WRENCHAI_API_KEY: ${{ secrets.WRENCHAI_API_KEY }}
-          BASE_URL: ${{ vars.WRENCHAI_BASE_URL || 'https://api.refuseless.com/v1' }}
-          MODEL: ${{ vars.WRENCHAI_MODEL || 'glm-5.3-abliterated' }}
+          REFLECTION_API_KEY: ${{ secrets.REFLECTION_API_KEY || secrets.WRENCHAI_API_KEY }}
+          BASE_URL: ${{ vars.WRENCHAI_BASE_URL || 'https://api.reflection.ai/openai/v1' }}
+          MODEL: ${{ vars.WRENCHAI_MODEL || 'Beam-1.0-501B-A23B' }}
         run: |
           set -euo pipefail
 
-          if [ -z "${WRENCHAI_API_KEY:-}" ]; then
-            echo "::error::WRENCHAI_API_KEY is not set in the WRENCHAI_API_KEY environment"
+          if [ -z "${REFLECTION_API_KEY:-}" ]; then
+            echo "::error::Set REFLECTION_API_KEY (or replace the WRENCHAI_API_KEY secret) with your Reflection key"
             exit 1
           fi
-          echo "::add-mask::$WRENCHAI_API_KEY"
+          echo "::add-mask::$REFLECTION_API_KEY"
 
-          code=$(curl -sS -o /tmp/models.json -w '%{http_code}' \
-            -H "Authorization: Bearer $WRENCHAI_API_KEY" \
-            "$BASE_URL/models")
-          echo "GET $BASE_URL/models -> $code"
+          body=$(printf '{"model":"%s","messages":[{"role":"user","content":"ping"}],"max_tokens":5,"temperature":0}' "$MODEL")
+          code=$(curl -sS -o /tmp/chat.json -w '%{http_code}' \
+            -X POST "$BASE_URL/chat/completions" \
+            -H "Authorization: Bearer $REFLECTION_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body")
+          echo "POST $BASE_URL/chat/completions -> $code"
+
           if [ "$code" != "200" ]; then
-            head -c 400 /tmp/models.json || true
-            echo
-            echo "::error::The key was rejected by the endpoint (HTTP $code)"
+            python3 - <<'EOF' || head -c 400 /tmp/chat.json
+          import json
+          data = json.load(open("/tmp/chat.json"))
+          print(json.dumps(data.get("error", data))[:400])
+          EOF
+            echo "::error::The key or model was rejected (HTTP $code)"
             exit 1
           fi
 
-          if ! grep -q "$MODEL" /tmp/models.json; then
-            echo "::warning::Key is valid but $MODEL was not listed in /models"
+          if grep -q '"choices"' /tmp/chat.json; then
+            echo "Key is valid and $MODEL answered"
           else
-            echo "Key is valid and $MODEL is available"
+            echo "::error::Response had no choices"
+            head -c 400 /tmp/chat.json
+            exit 1
           fi

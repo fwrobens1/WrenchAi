@@ -6,12 +6,17 @@ local Config = {}
 local FOLDER = "WrenchAi"
 local FILE = FOLDER .. "/config.json"
 
+-- The endpoint this project shipped with first; saved installs still point at
+-- it, so rewrite that exact pair once instead of leaving people on a dead API.
+local RETIRED_BASE_URL = "https://api.refuseless.com/v1"
+local RETIRED_MODEL = "glm-5.3-abliterated"
+
 Config.Defaults = {
-    baseURL = "https://api.refuseless.com/v1",
-    model = "glm-5.3-abliterated",
+    baseURL = "https://api.reflection.ai/openai/v1",
+    model = "Beam-1.0-501B-A23B",
     apiKey = "",
     temperature = 0.7,
-    maxTokens = 2048,
+    maxTokens = 16000,
     maxSteps = 12,
     maxToolChars = 9000,
     autoApproveScripts = false,
@@ -65,6 +70,11 @@ function Config.Load()
     local injectedKey = Compat.Environment.WrenchAiApiKey
     if type(injectedKey) == "string" and Util.Trim(injectedKey) ~= "" then
         config.apiKey = Util.Trim(injectedKey)
+    end
+
+    if config.baseURL == RETIRED_BASE_URL and config.model == RETIRED_MODEL then
+        config.baseURL = Config.Defaults.baseURL
+        config.model = Config.Defaults.model
     end
 
     return config

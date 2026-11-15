@@ -894,8 +894,8 @@ function UI:BuildSettings()
     end
 
     section("Connection")
-    self.settingBaseURL = field("Base URL", self.config.baseURL, "https://api.refuseless.com/v1")
-    self.settingModel = field("Model", self.config.model, "glm-5.3-abliterated")
+    self.settingBaseURL = field("Base URL", self.config.baseURL, "https://api.reflection.ai/openai/v1")
+    self.settingModel = field("Model", self.config.model, "Beam-1.0-501B-A23B")
     self.settingKey = field("API key (stored on this device)", self.config.apiKey, "sk-...")
 
     section("Agent")

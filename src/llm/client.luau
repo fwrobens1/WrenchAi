@@ -53,7 +53,7 @@ function Client:Chat(messages, tools, isCancelled)
         model = self.config.model,
         messages = messages,
         temperature = tonumber(self.config.temperature) or 0.7,
-        max_tokens = tonumber(self.config.maxTokens) or 2048,
+        max_tokens = tonumber(self.config.maxTokens) or 16000,
     }
     if tools and #tools > 0 then
         body.tools = tools
