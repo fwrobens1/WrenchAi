@@ -174,7 +174,8 @@ WrenchAi does not try. Because this repository is public, embedding the key in
 What the environment secret is good for:
 
 - CI that calls the endpoint with the secret to verify the key still works, without ever
-  writing it to the bundle (see `.github/workflows/` in the repo).
+  writing it to the bundle (for example, `curl /models` inside a job attached to the
+  `WRENCHAI_API_KEY` environment).
 - A future proxy on your own host (the EC2 box behind Tailscale, for example): the proxy
   holds `WRENCHAI_API_KEY` and forwards `/v1/chat/completions`, and the in-game config only
   knows the proxy URL. That is the only design that keeps a real key out of every client.
