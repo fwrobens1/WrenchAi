@@ -1,0 +1,11 @@
+{
+  "name": "wrenchai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node test/build-smoke.mjs && luau test/out.luau",
+    "check": "luau-compile --binary dist/WrenchAi.luau > /dev/null"
+  }
+}

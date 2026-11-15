@@ -1,0 +1,401 @@
+local HttpService = game:GetService("HttpService")
+local Client = require("../llm/client")
+local Prompt = require("./prompt")
+local Serialize = require("../serialize")
+local Util = require("../util")
+
+local Loop = {}
+Loop.__index = Loop
+
+local MAX_CONTEXT_CHARS = 60000
+
+local function messageChars(message)
+    local size = #tostring(message.content or "")
+    if type(message.tool_calls) == "table" then
+        size += #message.tool_calls * 240
+    end
+    return size
+end
+
+local function isTurnStart(message)
+    if message.role ~= "user" then
+        return false
+    end
+    if type(message.content) == "string" and message.content:sub(1, 13) == "[TOOL RESULT:" then
+        return false
+    end
+    return true
+end
+
+local function trimHistory(messages, budget)
+    local total = 0
+    for _, message in ipairs(messages) do
+        total += messageChars(message)
+    end
+    if total <= budget then
+        return messages
+    end
+
+    local keepFrom = 1
+    while total > budget do
+        local nextUser = nil
+        for index = keepFrom + 1, #messages do
+            if isTurnStart(messages[index]) then
+                nextUser = index
+                break
+            end
+        end
+        if not nextUser then
+            break
+        end
+        local laterUser = false
+        for index = nextUser + 1, #messages do
+            if isTurnStart(messages[index]) then
+                laterUser = true
+                break
+            end
+        end
+        if not laterUser then
+            break
+        end
+        for index = keepFrom, nextUser - 1 do
+            total -= messageChars(messages[index])
+        end
+        keepFrom = nextUser
+    end
+
+    local trimmed = {}
+    for index = keepFrom, #messages do
+        table.insert(trimmed, messages[index])
+    end
+    return trimmed
+end
+
+local function normalizeContent(content)
+    if content == nil then
+        return nil
+    end
+    if type(content) == "string" then
+        return content
+    end
+    if type(content) == "table" then
+        if type(content.text) == "string" then
+            return content.text
+        end
+        local parts = {}
+        for _, part in ipairs(content) do
+            if type(part) == "string" then
+                table.insert(parts, part)
+            elseif type(part) == "table" and type(part.text) == "string" then
+                table.insert(parts, part.text)
+            end
+        end
+        return table.concat(parts, "\n")
+    end
+    return tostring(content)
+end
+
+local function sanitizeToolCalls(rawCalls)
+    local calls = {}
+    if type(rawCalls) ~= "table" then
+        return calls
+    end
+    for index, raw in ipairs(rawCalls) do
+        local fn = raw["function"] or {}
+        local name = fn.name
+        if type(name) == "string" and name ~= "" then
+            local arguments = fn.arguments
+            if type(arguments) ~= "string" then
+                local ok, encoded = pcall(function()
+                    return HttpService:JSONEncode(arguments or {})
+                end)
+                arguments = ok and encoded or "{}"
+            end
+            table.insert(calls, {
+                id = tostring(raw.id or ("call_" .. tostring(index))),
+                type = "function",
+                ["function"] = { name = name, arguments = arguments },
+            })
+        end
+    end
+    return calls
+end
+
+local function parseArguments(raw)
+    if type(raw) == "table" then
+        return raw
+    end
+    if raw == nil or raw == "" then
+        return {}
+    end
+    if type(raw) ~= "string" then
+        return nil, "Tool arguments were not a JSON string."
+    end
+    local ok, decoded = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if ok and type(decoded) == "table" then
+        return decoded
+    end
+    return nil, "Tool arguments were not valid JSON: " .. Util.Truncate(raw, 200)
+end
+
+local function looksLikeToolRejection(err)
+    local raw = string.lower(tostring(err.raw or err.message or ""))
+    return raw:find("tool", 1, true) ~= nil
+end
+
+local function extractProtocolCall(content, tools)
+    if type(content) ~= "string" then
+        return nil
+    end
+    local text = Util.Trim(content)
+    local fenced = text:match("```[%w]*%s*(.-)%s*```")
+    if fenced then
+        text = Util.Trim(fenced)
+    end
+    if text:sub(1, 1) ~= "{" or text:sub(-1) ~= "}" then
+        return nil
+    end
+    local ok, decoded = pcall(function()
+        return HttpService:JSONDecode(text)
+    end)
+    if not ok or type(decoded) ~= "table" then
+        return nil
+    end
+    local name = decoded.tool or decoded.name
+    local args = decoded.args or decoded.arguments or {}
+    if type(name) ~= "string" or not tools:Has(name) or type(args) ~= "table" then
+        return nil
+    end
+    return { name = name, arguments = args }
+end
+
+function Loop.new(deps)
+    local self = setmetatable({}, Loop)
+    self.ui = deps.ui
+    self.tools = deps.tools
+    self.config = deps.config
+    self.compat = deps.compat
+    self.client = Client.new(deps.config)
+    self.messages = {}
+    self.running = false
+    self.cancelled = false
+    self.toolsSupported = true
+    return self
+end
+
+function Loop:RefreshConfig(config)
+    self.config = config
+    self.client = Client.new(config)
+end
+
+function Loop:IsCancelled()
+    return self.cancelled
+end
+
+function Loop:Cancel()
+    self.cancelled = true
+end
+
+function Loop:Reset()
+    self.messages = {}
+    self.cancelled = false
+end
+
+function Loop:BuildSystem()
+    local system = Prompt.Build(self.compat, self.config)
+    local catalog = self.tools:PromptCatalog()
+    if self.toolsSupported then
+        return system
+            .. "\n\n"
+            .. catalog
+            .. "\n\nUse the provided function tools. If they are unavailable, reply with ONLY a single JSON object:"
+            .. ' {"tool":"tool_name","args":{...}}.'
+    end
+    return system
+        .. "\n\n"
+        .. catalog
+        .. "\n\nThis endpoint has no native tool calling. To call a tool, reply with ONLY a single JSON object:"
+        .. ' {"tool":"tool_name","args":{...}}.'
+        .. " You will then receive a [TOOL RESULT] message. Otherwise answer the user normally."
+end
+
+function Loop:BuildRequest()
+    local request = {
+        { role = "system", content = self:BuildSystem() },
+    }
+    local history = trimHistory(self.messages, MAX_CONTEXT_CHARS)
+    for _, message in ipairs(history) do
+        table.insert(request, message)
+    end
+    return request
+end
+
+function Loop:RunTool(name, args, rawArguments)
+    local card = self.ui:AddToolCard(name, Util.Truncate(rawArguments or "{}", 600))
+    local started = os.clock()
+    local result = self.tools:Call(name, args)
+    local duration = os.clock() - started
+    local json = Serialize.Encode(result, tonumber(self.config.maxToolChars) or 9000)
+    card:Finish(result.ok ~= false, json, duration)
+    return result, json
+end
+
+function Loop:Execute()
+    local maxSteps = Util.Clamp(tonumber(self.config.maxSteps) or 12, 1, 30)
+    local step = 1
+    local finished = false
+
+    while step <= maxSteps do
+        if self.cancelled then
+            break
+        end
+        self.ui:SetStatus("Thinking - step " .. tostring(step) .. "/" .. tostring(maxSteps))
+        local schemas = self.toolsSupported and self.tools:Schemas() or nil
+        local request = self:BuildRequest()
+        local response, err = self.client:Chat(request, schemas, function()
+            return self.cancelled
+        end)
+
+        if self.cancelled then
+            break
+        end
+
+        if err then
+            if self.toolsSupported and err.kind == "http" and looksLikeToolRejection(err) then
+                self.toolsSupported = false
+                self.ui:AddSystem("This endpoint rejected native tool calling; switched to the JSON tool protocol.")
+                continue
+            end
+            self.ui:AddError(err.message or "The API request failed.")
+            if err.kind == "auth" then
+                self.ui:OpenSettings()
+            end
+            break
+        end
+
+        local choice = nil
+        if type(response.data.choices) == "table" then
+            choice = response.data.choices[1]
+        end
+        if not choice then
+            self.ui:AddError("The API response contained no choices.")
+            break
+        end
+
+        local message = choice.message or {}
+        local content = normalizeContent(message.content)
+        local calls = sanitizeToolCalls(message.tool_calls)
+
+        if #calls > 0 then
+            table.insert(self.messages, {
+                role = "assistant",
+                content = content or "",
+                tool_calls = calls,
+            })
+            if content and Util.Trim(content) ~= "" then
+                self.ui:AddMessage("assistant", content)
+            end
+
+            local limit = math.min(#calls, 6)
+            for index = 1, limit do
+                if self.cancelled then
+                    break
+                end
+                local call = calls[index]
+                local name = call["function"].name
+                local args, argumentError = parseArguments(call["function"].arguments)
+                local json
+                if args then
+                    local _, resultJson = self:RunTool(name, args, call["function"].arguments)
+                    json = resultJson
+                else
+                    json = Serialize.Encode(
+                        { ok = false, error = argumentError },
+                        tonumber(self.config.maxToolChars) or 9000
+                    )
+                    self.ui:AddToolCard(name, "invalid arguments"):Finish(false, json, 0)
+                end
+                table.insert(self.messages, {
+                    role = "tool",
+                    tool_call_id = call.id,
+                    content = json,
+                })
+            end
+            for index = limit + 1, #calls do
+                table.insert(self.messages, {
+                    role = "tool",
+                    tool_call_id = calls[index].id,
+                    content = '{"ok":false,"error":"Skipped: per-step tool call limit reached."}',
+                })
+            end
+            step += 1
+        else
+            local text = content or ""
+            local protocolCall = extractProtocolCall(text, self.tools)
+            if protocolCall then
+                table.insert(self.messages, { role = "assistant", content = text })
+                local argsJson = Serialize.Encode(protocolCall.arguments, 600)
+                local _, resultJson = self:RunTool(protocolCall.name, protocolCall.arguments, argsJson)
+                table.insert(self.messages, {
+                    role = "user",
+                    content = "[TOOL RESULT: "
+                        .. protocolCall.name
+                        .. "]\n"
+                        .. resultJson
+                        .. "\n\nContinue: call another tool or answer the user.",
+                })
+                step += 1
+            else
+                if Util.Trim(text) == "" then
+                    text = "(The model returned no text.)"
+                end
+                self.ui:AddMessage("assistant", text)
+                table.insert(self.messages, { role = "assistant", content = text })
+                finished = true
+                break
+            end
+        end
+    end
+
+    if self.cancelled then
+        self.ui:AddSystem("Stopped.")
+    elseif not finished then
+        self.ui:AddSystem("Reached the step limit (" .. tostring(maxSteps) .. "). Send another message to continue.")
+    end
+end
+
+function Loop:Send(text)
+    if self.running then
+        return
+    end
+    local clean = Util.Trim(text)
+    if clean == "" then
+        return
+    end
+
+    self.running = true
+    self.cancelled = false
+    table.insert(self.messages, { role = "user", content = clean })
+    self.ui:SetRunning(true)
+    self.ui:SetStatus("Thinking...")
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            self:Execute()
+        end)
+        if not ok then
+            self.ui:AddError("Agent error: " .. Util.ErrorText(err))
+        end
+        self.running = false
+        self.ui:SetRunning(false)
+        if self.cancelled then
+            self.ui:SetStatus("Stopped")
+        else
+            self.ui:SetStatus("Ready")
+        end
+    end)
+end
+
+return Loop
